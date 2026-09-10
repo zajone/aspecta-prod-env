@@ -6,8 +6,8 @@ type: application
 # image is published. appVersion is the application version and doubles as the
 # default container image tag, so a chart release always points at a matching
 # image.
-version: 0.1.1
-appVersion: "1.0.1"
+version: 0.1.2
+appVersion: "1.0.2"
 home: https://github.com/zajone/aspecta-prod-env
 sources:
   - https://github.com/zajone/aspecta-prod-env
