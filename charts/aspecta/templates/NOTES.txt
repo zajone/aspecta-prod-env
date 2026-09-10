@@ -1,0 +1,34 @@
+Aspecta {{ .Chart.AppVersion }} (chart {{ .Chart.Version }}) is installed as release "{{ .Release.Name }}" in namespace {{ .Release.Namespace }}.
+
+Images
+  backend   {{ include "aspecta.image" (dict "root" . "component" .Values.backend) }}
+  frontend  {{ include "aspecta.image" (dict "root" . "component" .Values.frontend) }}
+
+Reach the UI
+{{- if .Values.ingress.enabled }}
+  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "aspecta.componentName" (dict "root" . "component" "frontend") }} 8080:{{ .Values.frontend.service.port }}
+{{- end }}
+
+Verify the release
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+  kubectl -n {{ .Release.Namespace }} get deploy,hpa,pdb,netpol
+
+Security posture in this release
+  - workload ServiceAccount has no API permissions and no projected token
+  - all traffic in the namespace is denied by default; {{ if .Values.networkPolicy.enabled }}3 policies{{ else }}NetworkPolicies are DISABLED{{ end }} reopen only the required flows
+  - the backend has no egress at all, including DNS
+{{- if not .Values.secret.create }}
+  - the admin token comes from the out-of-band Secret "{{ include "aspecta.secretName" . }}"; without it the privileged endpoint stays closed
+{{- else }}
+  - WARNING: secret.create is true, so an admin token is rendered from values. Do not commit that value.
+{{- end }}
+
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+
+Observability
+  - ServiceMonitor scrapes {{ include "aspecta.componentName" (dict "root" . "component" "backend") }}:{{ .Values.backend.service.opsPort }}/metrics every {{ .Values.monitoring.serviceMonitor.interval }}
+  - Grafana dashboard "Aspecta / Service overview" is imported from a ConfigMap
+  - alert rules are in the PrometheusRule "{{ include "aspecta.fullname" . }}"; the runbook is at docs/runbook.md
+{{- end }}

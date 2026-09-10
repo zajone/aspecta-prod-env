@@ -1,0 +1,49 @@
+{{- if .Values.monitoring }}
+{{/*
+The Prometheus Operator CRDs are installed as their own Application, ahead of
+everything else, to break a dependency cycle:
+
+  - ingress-nginx and metrics-server both ship a ServiceMonitor, so they need
+    the CRD to exist before they can sync;
+  - the monitoring stack publishes Grafana, Prometheus and Alertmanager through
+    Ingress objects, and Argo CD only reports an Ingress as healthy once a
+    controller has claimed it - so the monitoring stack needs ingress-nginx to
+    exist before *it* can become healthy.
+
+Neither can go first. Extracting the CRDs into wave -1 resolves it, and it is
+also the right thing to do on its own: CRDs have a different lifecycle from the
+workloads that use them, and this way an upgrade of the monitoring stack cannot
+silently remove a CRD that other charts depend on.
+*/}}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: prometheus-operator-crds
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: {{ .Values.charts.prometheusOperatorCrds.repo | quote }}
+    chart: prometheus-operator-crds
+    targetRevision: {{ .Values.charts.prometheusOperatorCrds.version | quote }}
+    helm:
+      releaseName: prometheus-operator-crds
+  destination:
+    server: {{ .Values.destinationServer }}
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      # CRDs are never pruned automatically: removing one deletes every custom
+      # resource of that kind in the cluster, which is not a decision a
+      # reconciliation loop should make on its own.
+      prune: false
+      selfHeal: {{ .Values.syncPolicy.selfHeal }}
+    syncOptions:
+      # Server-side apply is mandatory here: these CRDs are far larger than the
+      # 256 kB annotation that client-side apply would have to store.
+      - ServerSideApply=true
+{{- end }}

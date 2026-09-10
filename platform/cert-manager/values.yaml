@@ -1,0 +1,75 @@
+# cert-manager: issues and renews every TLS certificate in the cluster.
+#
+# It exists because nothing in this environment may be served over plain HTTP.
+# The hostnames are *.localtest.me, which resolves to 127.0.0.1 from public DNS
+# but can never pass an ACME HTTP-01 or DNS-01 challenge, so a public CA is not
+# an option. Instead cert-manager runs a private CA of its own (see
+# platform/cert-manager/issuers.yaml) and signs a certificate per host from it.
+#
+# The mechanism is identical to a real deployment: the same Certificate objects,
+# the same ingress-shim annotations, the same renewal loop. Only the issuer
+# changes - swap the CA ClusterIssuer for an ACME one and every Ingress in this
+# repository gets a publicly trusted certificate without a single other edit.
+
+crds:
+  # Installed with the chart rather than as a separate Application: unlike the
+  # Prometheus Operator CRDs, nothing else in this repository depends on them,
+  # so there is no dependency cycle to break here.
+  enabled: true
+  # Keep the CRDs if the release is ever removed. Deleting them garbage-collects
+  # every Certificate and Issuer in the cluster, which would silently take the
+  # whole TLS layer down.
+  keep: true
+
+global:
+  leaderElection:
+    namespace: cert-manager
+
+replicaCount: 1
+
+# Sized for a laptop, like every other component here. cert-manager is mostly
+# idle: it wakes up to sign a certificate and to renew one at two thirds of its
+# lifetime.
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    memory: 192Mi
+
+startupapicheck:
+  # Disabled deliberately. It is a Helm hook Job whose only job is to block the
+  # install until the webhook answers - which Argo CD already does by refusing
+  # to advance to the next sync wave until this Application reports Healthy. Left
+  # enabled, the Job is re-created on every sync and shows up as permanent
+  # churn in the UI.
+  enabled: false
+
+webhook:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 96Mi
+
+cainjector:
+  # Required: it is what injects the CA bundle into cert-manager's own webhook
+  # configuration, and into any other object annotated for it.
+  enabled: true
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+
+prometheus:
+  enabled: true
+  servicemonitor:
+    # Picked up by the Prometheus in the monitoring namespace, which selects
+    # ServiceMonitors cluster-wide. This is what makes certificate expiry an
+    # alertable metric (certmanager_certificate_expiration_timestamp_seconds)
+    # rather than something discovered by a browser warning.
+    enabled: true
+    interval: 60s

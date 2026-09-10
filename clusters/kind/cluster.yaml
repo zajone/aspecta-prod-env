@@ -1,0 +1,52 @@
+# kind topology for the Aspecta production environment.
+#
+# Three nodes rather than one: with a control plane and two workers the
+# topologySpreadConstraints and the PodDisruptionBudgets in the chart do
+# something real, and a "drain a node" exercise behaves like it would in a
+# managed cluster. Measured footprint of the whole stack is roughly 5 GB of
+# RAM, which leaves headroom on a 12 GB WSL VM or a 16 GB Mac.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: aspecta
+
+networking:
+  # kindnet, the default CNI, enforces NetworkPolicy in current kind releases,
+  # so the policies in the chart are actually applied rather than ignored.
+  # scripts/verify-security.sh proves that at runtime.
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/16"
+
+nodes:
+  - role: control-plane
+    # Pinned so the same commit produces the same Kubernetes version months later.
+    image: kindest/node:v1.34.0
+    labels:
+      ingress-ready: "true"
+    extraPortMappings:
+      # Publishes the Ingress controller on the host, which is what makes
+      # https://aspecta.localtest.me work identically on WSL, macOS and Linux.
+      #
+      # listenAddress is not cosmetic. Without it kind binds 0.0.0.0, which
+      # put Prometheus and Alertmanager - neither of which has any
+      # authentication - on every network this machine is attached to, where
+      # anyone could read the metrics, silence alerts or inject them. Bound to
+      # loopback the environment is reachable from this machine only, which is
+      # all a local cluster ever needs.
+      - containerPort: 80
+        hostPort: 80
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+  - role: worker
+    image: kindest/node:v1.34.0
+  - role: worker
+    image: kindest/node:v1.34.0

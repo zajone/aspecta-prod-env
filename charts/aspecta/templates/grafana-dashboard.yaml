@@ -1,0 +1,18 @@
+{{- if .Values.monitoring.grafanaDashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aspecta.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+    # The Grafana sidecar watches for this label across all namespaces and
+    # imports the dashboard, so the dashboard is delivered as code by the same
+    # Argo CD sync as the application - never clicked together by hand.
+    {{ .Values.monitoring.grafanaDashboard.sidecarLabel }}: {{ .Values.monitoring.grafanaDashboard.sidecarLabelValue | quote }}
+  annotations:
+    grafana_folder: Aspecta
+data:
+  aspecta-overview.json: |-
+    {{- .Files.Get "dashboards/aspecta-overview.json" | nindent 4 }}
+{{- end }}

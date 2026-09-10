@@ -1,0 +1,27 @@
+# Locally downloaded CLI tooling (see scripts/install-tools.sh)
+bin/
+
+# Helm
+charts/**/charts/
+*.tgz
+
+# Rendered manifests and scratch output
+out/
+tmp/
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+.DS_Store
+
+# Never commit real secrets
+*.local.yaml
+*.secret.yaml
+kubeconfig*
+
+# The environment's CA certificate, extracted from the cluster by
+# scripts/lib.sh. Not a secret - the private key never leaves the cluster - but
+# it is derived state that differs per cluster, so it does not belong in git.
+.tls/

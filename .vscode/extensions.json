@@ -1,0 +1,13 @@
+{
+  // Extensions that understand the file types in this repository.
+  // VS Code parses this file as JSONC, so comments are fine here.
+  "recommendations": [
+    "golang.go",
+    "redhat.vscode-yaml",
+    "ms-kubernetes-tools.vscode-kubernetes-tools",
+    "tim-koehler.helm-intellisense",
+    "timonwong.shellcheck",
+    "ms-azuretools.vscode-docker",
+    "github.vscode-github-actions"
+  ]
+}

@@ -1,0 +1,254 @@
+name: pull-request
+
+# The gate on every pull request. It runs the same checks as the delivery
+# pipeline but publishes nothing, so a broken change is rejected before it can
+# reach the branch Argo CD is watching.
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        # No credential left in .git/config: this job only reads the
+        # repository, and a token that outlives the checkout step is
+        # readable by every later step, including module code that
+        # `go build` executes.
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: apps/backend/go.mod
+          cache-dependency-path: apps/backend/go.sum
+
+      - name: go test
+        working-directory: apps/backend
+        run: go test ./... -race -cover
+
+      - name: install tooling
+        run: scripts/install-tools.sh
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -x -S warning scripts/*.sh
+
+      - name: helm lint, render and schema-validate
+        run: scripts/lint.sh
+
+      - name: show what this change does to the rendered manifests
+        # A diff of the rendered output is far more reviewable than a diff of
+        # the templates, and it is where an accidental change to a probe or a
+        # policy becomes obvious.
+        run: |
+          helm template aspecta charts/aspecta > /tmp/head.yaml
+          git fetch --quiet origin "${{ github.event.pull_request.base.ref }}"
+          git worktree add --quiet /tmp/base "origin/${{ github.event.pull_request.base.ref }}"
+          helm template aspecta /tmp/base/charts/aspecta > /tmp/base.yaml 2>/dev/null || : > /tmp/base.yaml
+          {
+            echo '### Rendered manifest diff'
+            echo '```diff'
+            diff -u /tmp/base.yaml /tmp/head.yaml | head -200 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: build ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [backend, frontend]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        # No credential left in .git/config: this job only reads the
+        # repository, and a token that outlives the checkout step is
+        # readable by every later step, including module code that
+        # `go build` executes.
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: build without publishing
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: apps/${{ matrix.component }}
+          file: apps/${{ matrix.component }}/Dockerfile
+          # Only the runner's own platform on a pull request: cross-building
+          # under emulation would double the feedback time for no benefit.
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: aspecta-${{ matrix.component }}:pr
+          build-args: |
+            VERSION=pr-${{ github.event.pull_request.number }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+
+      - name: scan the image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: aspecta-${{ matrix.component }}:pr
+          format: table
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: scan the Dockerfile and manifests for misconfiguration
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: table
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+
+  e2e:
+    name: end-to-end on a throwaway cluster
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        # No credential left in .git/config: this job only reads the
+        # repository, and a token that outlives the checkout step is
+        # readable by every later step, including module code that
+        # `go build` executes.
+        with:
+          persist-credentials: false
+
+      - name: install tooling
+        run: scripts/install-tools.sh
+
+      - name: create a kind cluster
+        # A single node here: this job proves the manifests converge and the
+        # application answers, not that the topology spreads.
+        run: |
+          cat > /tmp/kind-ci.yaml <<'EOF'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          name: aspecta-ci
+          nodes:
+            - role: control-plane
+              image: kindest/node:v1.34.0
+              labels:
+                ingress-ready: "true"
+          EOF
+          bin/kind create cluster --config /tmp/kind-ci.yaml --wait 120s
+
+      - name: build and load the images
+        env:
+          CLUSTER_NAME: aspecta-ci
+        run: scripts/build-images.sh
+
+      - name: create the namespaces
+        run: kubectl apply -f platform/namespaces.yaml
+
+      - name: install cert-manager and the environment CA
+        # The application Ingress asks for a certificate by annotation, so
+        # cert-manager and the CA have to exist here for the same reason they
+        # are sync waves 0 and 1 in the real environment. Without them the
+        # annotation would be inert and this job would silently stop covering
+        # the TLS configuration it is meant to prove.
+        run: |
+          bin/helm repo add jetstack https://charts.jetstack.io
+          bin/helm upgrade --install cert-manager jetstack/cert-manager \
+            --version v1.21.1 --namespace cert-manager \
+            --values platform/cert-manager/values.yaml \
+            --set prometheus.servicemonitor.enabled=false \
+            --wait --timeout 5m
+          kubectl apply -f platform/cert-manager/issuers.yaml
+          kubectl wait --for=condition=Ready clusterissuer/aspecta-ca --timeout=120s
+          kubectl -n ingress-nginx wait --for=condition=Ready \
+            certificate/default-wildcard --timeout=120s
+
+      - name: install the ingress controller
+        run: |
+          bin/helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          bin/helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --version 4.15.1 --namespace ingress-nginx \
+            --values platform/ingress-nginx/values.yaml \
+            --set controller.hostPort.enabled=false \
+            --wait --timeout 5m
+
+      - name: install the application chart
+        # The monitoring CRDs are not installed in this job, so the objects that
+        # depend on them are switched off - the same switch the MONITORING=off
+        # bootstrap path uses.
+        run: |
+          kubectl -n aspecta create secret generic aspecta-admin \
+            --from-literal=ADMIN_TOKEN="$(openssl rand -hex 24)"
+          bin/helm upgrade --install aspecta charts/aspecta \
+            --namespace aspecta \
+            --set global.image.owner="${{ github.repository_owner }}" \
+            --set monitoring.serviceMonitor.enabled=false \
+            --set monitoring.prometheusRule.enabled=false \
+            --set monitoring.grafanaDashboard.enabled=false \
+            --wait --timeout 5m
+
+      - name: assert the application is served over TLS only
+        run: |
+          set -euo pipefail
+          # A certificate was actually issued for the Ingress host, from our CA.
+          kubectl -n aspecta wait --for=condition=Ready \
+            certificate/aspecta-tls --timeout=120s
+          kubectl -n aspecta get ingress aspecta \
+            -o jsonpath='{.spec.tls[0].secretName}' | grep -qx aspecta-tls
+          # hostPort is off in this job, so the redirect is checked from inside
+          # the cluster against the controller Service rather than 127.0.0.1.
+          kubectl -n ingress-nginx run redirect-probe --rm -i --restart=Never \
+            --image=curlimages/curl:8.11.1 --quiet -- \
+            curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' \
+              --resolve "aspecta.localtest.me:80:$(kubectl -n ingress-nginx get svc \
+                ingress-nginx-controller -o jsonpath='{.spec.clusterIP}')" \
+              http://aspecta.localtest.me/ | tee /tmp/redirect.txt
+          grep -q '^308 https://aspecta.localtest.me/' /tmp/redirect.txt
+
+      - name: run the chart test suite
+        run: bin/helm test aspecta -n aspecta --timeout 3m --logs
+
+      - name: assert the NetworkPolicies are enforced
+        run: |
+          set -euo pipefail
+          kubectl create namespace probe
+          kubectl -n probe run probe --image=nginxinc/nginx-unprivileged:1.27-alpine \
+            --restart=Never --command -- sleep 300
+          kubectl -n probe wait --for=condition=Ready pod/probe --timeout=120s
+          result="$(kubectl -n probe exec probe -- /bin/sh -c \
+            "wget -q -T 4 -O- http://aspecta-backend.aspecta.svc:8080/api/v1/stats >/dev/null 2>&1 && echo reachable || echo blocked")"
+          echo "cross-namespace access to the backend: ${result}"
+          test "${result}" = "blocked"
+
+      - name: assert RBAC is least privilege
+        run: |
+          set -euo pipefail
+          test "$(kubectl auth can-i get secrets -n aspecta \
+            --as=system:serviceaccount:aspecta:aspecta-viewer)" = "no"
+          test "$(kubectl auth can-i get pods -n aspecta \
+            --as=system:serviceaccount:aspecta:aspecta-viewer)" = "yes"
+          test "$(kubectl auth can-i create deployments -n aspecta \
+            --as=system:serviceaccount:aspecta:aspecta-operator)" = "no"
+          test "$(kubectl auth can-i get pods -n aspecta \
+            --as=system:serviceaccount:aspecta:aspecta)" = "no"
+
+      - name: collect diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get all -A
+          kubectl -n aspecta describe pods
+          kubectl get certificate,clusterissuer -A || true
+          kubectl -n cert-manager logs deploy/cert-manager --tail=100 || true
+          kubectl -n aspecta logs -l app.kubernetes.io/part-of=aspecta --tail=100 --all-containers || true
+
+      - name: delete the cluster
+        if: always()
+        run: bin/kind delete cluster --name aspecta-ci

@@ -1,0 +1,471 @@
+# kube-prometheus-stack: Prometheus, Alertmanager, Grafana, the Prometheus
+# Operator, kube-state-metrics and node-exporter.
+#
+# Sized for a laptop: retention is short, storage is in-memory and every
+# component has an explicit memory limit, so the whole monitoring stack stays
+# around 1.5 GB instead of the several GB the chart defaults to.
+
+fullnameOverride: kps
+
+crds:
+  enabled: true
+
+## ---------------------------------------------------------------------------
+## Components that cannot be scraped in kind
+## ---------------------------------------------------------------------------
+# etcd, the scheduler, the controller manager and kube-proxy bind their metrics
+# endpoints to 127.0.0.1 inside the kind control-plane container. Leaving these
+# enabled would produce permanently firing "component down" alerts that train
+# everyone to ignore alerts. They are disabled deliberately, not forgotten.
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+defaultRules:
+  create: true
+  rules:
+    etcd: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeControllerManager: false
+    windows: false
+    # The dead man's switch stays on: an always-firing alert is the only way to
+    # notice that the alerting pipeline itself has stopped working.
+    general: true
+
+## ---------------------------------------------------------------------------
+## Prometheus
+## ---------------------------------------------------------------------------
+prometheus:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: aspecta-ca
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    hosts:
+      - prometheus.localtest.me
+    paths:
+      - /
+    pathType: Prefix
+    tls:
+      - secretName: prometheus-tls
+        hosts:
+          - prometheus.localtest.me
+
+  prometheusSpec:
+    # The address Prometheus believes it is reachable at. Without it, the links
+    # it writes into an alert - and the ones Alertmanager renders from them -
+    # point at the pod's own hostname over plaintext.
+    externalUrl: https://prometheus.localtest.me
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    retention: 24h
+    retentionSize: 2GB
+    walCompression: true
+
+    # Discover ServiceMonitors, PodMonitors and PrometheusRules from every
+    # namespace, not only those carrying this release's label. That is what lets
+    # the application chart ship its own ServiceMonitor and alert rules and have
+    # them picked up without touching the monitoring stack.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+
+    # An external label makes it obvious which cluster an alert came from once
+    # more than one cluster reports to the same Alertmanager.
+    externalLabels:
+      cluster: aspecta-prod
+
+    # No PersistentVolume: 24 hours of metrics for one small cluster fits in the
+    # pod's ephemeral storage, and a lost history after a restart is an
+    # acceptable trade for not running a database in a laptop cluster. A real
+    # cluster would set storageSpec to a StorageClass here.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 400Mi
+      limits:
+        memory: 1200Mi
+
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      fsGroup: 2000
+      seccompProfile:
+        type: RuntimeDefault
+
+## ---------------------------------------------------------------------------
+## Platform rules that belong to no single application
+## ---------------------------------------------------------------------------
+# Shipped through the chart's own additionalPrometheusRulesMap rather than as a
+# separate manifest, because that keeps them conditional on the monitoring stack
+# by construction: with MONITORING=off there is no PrometheusRule CRD, and a
+# free-standing file would fail to sync instead of simply not existing.
+additionalPrometheusRulesMap:
+  tls:
+    groups:
+      # ---------------------------------------------------------------------
+      # Certificate lifetime
+      # ---------------------------------------------------------------------
+      # Every host in this environment is HTTPS-only, which makes an expired
+      # certificate a total outage rather than a warning in a browser. These
+      # rules are the reason that outage is now something Prometheus reports
+      # days ahead instead of something a user discovers.
+      #
+      # cert-manager's own metric is an absolute unix timestamp; days-to-expiry
+      # is recorded once here so the dashboard and the alerts below cannot
+      # disagree about the arithmetic.
+      - name: tls.recording
+        interval: 60s
+        rules:
+          - record: tls:certificate_expiry_days
+            expr: |
+              (certmanager_certificate_expiration_timestamp_seconds - time()) / 86400
+
+          # The same figure as the ingress controller sees it. Recorded as well
+          # as cert-manager's own view because the two can genuinely disagree:
+          # cert-manager reports the Certificate it has issued, nginx reports
+          # the Secret it has actually loaded, and a controller that missed a
+          # renewal is exactly the gap worth seeing.
+          - record: tls:ingress_certificate_expiry_days
+            expr: |
+              (nginx_ingress_controller_ssl_expire_time_seconds - time()) / 86400
+
+      - name: tls.alerts
+        rules:
+          - alert: TLSCertificateExpiringSoon
+            # Three weeks: comfortably more than the renewBefore of 30 days set
+            # on the leaf certificates, so this only fires if renewal itself is
+            # broken rather than merely pending.
+            expr: tls:certificate_expiry_days < 21
+            for: 30m
+            labels:
+              severity: warning
+              component: tls
+            annotations:
+              summary: Certificate {{ "{{ $labels.exported_namespace }}/{{ $labels.name }}" }} expires in {{ "{{ $value | printf \"%.0f\" }}" }} days
+              description: >-
+                cert-manager should have renewed this certificate already. Check
+                the Certificate resource and the cert-manager controller log.
+              runbook_url: https://github.com/zajone/aspecta-prod-env/blob/main/docs/runbook.md#tls-and-certificates
+
+          - alert: TLSCertificateExpiringCritical
+            expr: tls:certificate_expiry_days < 7
+            for: 15m
+            labels:
+              severity: critical
+              component: tls
+            annotations:
+              summary: Certificate {{ "{{ $labels.exported_namespace }}/{{ $labels.name }}" }} expires in under 7 days
+              description: >-
+                Every host is served over HTTPS only, so this expiring is an
+                outage of that host, not a browser warning.
+              runbook_url: https://github.com/zajone/aspecta-prod-env/blob/main/docs/runbook.md#tls-and-certificates
+
+          - alert: TLSCertificateNotReady
+            expr: certmanager_certificate_ready_status{condition="True"} == 0
+            for: 15m
+            labels:
+              severity: warning
+              component: tls
+            annotations:
+              summary: Certificate {{ "{{ $labels.exported_namespace }}/{{ $labels.name }}" }} is not ready
+              description: >-
+                cert-manager cannot issue or renew this certificate. Until it
+                can, the host either serves the ingress controller's fallback
+                certificate or the previous one until it expires.
+              runbook_url: https://github.com/zajone/aspecta-prod-env/blob/main/docs/runbook.md#tls-and-certificates
+
+          - alert: TLSIssuerNotReady
+            expr: certmanager_clusterissuer_ready_status{condition="True"} == 0
+            for: 10m
+            labels:
+              severity: critical
+              component: tls
+            annotations:
+              summary: ClusterIssuer {{ "{{ $labels.name }}" }} is not ready
+              description: >-
+                No certificate in the cluster can be issued or renewed while its
+                issuer is down. Nothing breaks immediately; everything breaks as
+                certificates reach their renewal window.
+              runbook_url: https://github.com/zajone/aspecta-prod-env/blob/main/docs/runbook.md#tls-and-certificates
+
+          - alert: TLSHostServedByFallbackCertificate
+            # A named host being answered with the fallback wildcard means that
+            # host has no certificate of its own: an Ingress was merged without
+            # a cert-manager.io/cluster-issuer annotation or without a tls:
+            # block. The site still works - it is not an outage - but it is no
+            # longer the host's own certificate, and nobody would notice from
+            # the outside.
+            #
+            # host="_" is nginx's own name for the default server and is the one
+            # place the fallback is the correct answer.
+            expr: |
+              nginx_ingress_controller_ssl_expire_time_seconds{
+                host!="_", secret_name="default-wildcard-tls"}
+            for: 30m
+            labels:
+              severity: warning
+              component: tls
+            annotations:
+              summary: Host {{ "{{ $labels.host }}" }} is served by the fallback wildcard certificate
+              description: >-
+                ingress-nginx is answering {{ "{{ $labels.host }}" }} with
+                default-wildcard-tls rather than a certificate issued for it.
+                Check that its Ingress has both a tls: block and the
+                cert-manager.io/cluster-issuer annotation.
+              runbook_url: https://github.com/zajone/aspecta-prod-env/blob/main/docs/runbook.md#tls-and-certificates
+
+## ---------------------------------------------------------------------------
+## Alertmanager
+## ---------------------------------------------------------------------------
+alertmanager:
+  enabled: true
+
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: aspecta-ca
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    hosts:
+      - alertmanager.localtest.me
+    paths:
+      - /
+    pathType: Prefix
+    tls:
+      - secretName: alertmanager-tls
+        hosts:
+          - alertmanager.localtest.me
+
+  config:
+    global:
+      resolve_timeout: 5m
+
+    route:
+      # Group by the labels that identify one problem in one place, so ten
+      # failing pods produce one notification instead of ten.
+      group_by: [alertname, namespace, severity]
+      group_wait: 30s
+      group_interval: 2m
+      repeat_interval: 4h
+      receiver: aspecta-webhook
+      routes:
+        # Watchdog fires forever by design; it proves the pipeline is alive and
+        # must never reach a human.
+        - matchers:
+            - alertname = "Watchdog"
+          receiver: "null"
+        - matchers:
+            - severity = "critical"
+          receiver: aspecta-webhook
+          group_wait: 10s
+          repeat_interval: 1h
+
+    receivers:
+      - name: "null"
+      - name: aspecta-webhook
+        webhook_configs:
+          # The application itself is the receiver: it renders incoming
+          # notifications in its UI, which makes the whole alert path -
+          # rule fires, Alertmanager routes, receiver acknowledges - visible
+          # without an external chat or paging provider. Reachable because the
+          # backend NetworkPolicy opens the operations port to this namespace.
+          - url: http://aspecta-backend.aspecta.svc.cluster.local:9090/internal/alerts
+            send_resolved: true
+            max_alerts: 20
+      # A production cluster adds its paging receiver here, for example:
+      # - name: oncall
+      #   slack_configs:
+      #     - api_url_file: /etc/alertmanager/secrets/slack/url
+      #       channel: '#alerts'
+
+    inhibit_rules:
+      # While something is critically broken, do not also page about the
+      # warning-level symptoms of the same problem.
+      - source_matchers:
+          - severity = "critical"
+        target_matchers:
+          - severity = "warning"
+        equal: [alertname, namespace]
+
+  alertmanagerSpec:
+    # Same reason as Prometheus above: this is the base of every silence and
+    # notification link Alertmanager generates.
+    externalUrl: https://alertmanager.localtest.me
+    replicas: 1
+    retention: 72h
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        memory: 160Mi
+
+## ---------------------------------------------------------------------------
+## Grafana
+## ---------------------------------------------------------------------------
+grafana:
+  enabled: true
+
+  # The admin password is not in this file. The Secret is created out of band by
+  # scripts/bootstrap.sh, exactly like the application's admin token.
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: aspecta-ca
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    hosts:
+      - grafana.localtest.me
+    path: /
+    pathType: Prefix
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - grafana.localtest.me
+
+  defaultDashboardsTimezone: browser
+
+  # Probe tuning, and the reason for it.
+  #
+  # Grafana runs its schema migrations before it binds port 3000, and on a kind
+  # node's overlay filesystem that took over 160 seconds - longer than the
+  # chart's default grace of initialDelay 60s plus 10 failures. The liveness
+  # probe was therefore killing the container mid-migration, over and over.
+  #
+  # The right instrument would be a startupProbe, which suspends liveness until
+  # the process is up, but the Grafana chart exposes no such value - so the
+  # liveness probe has to carry the start-up grace itself: 60s plus 30 failures
+  # at 10s is six minutes before a genuinely wedged Grafana is restarted.
+  #
+  # The readiness timeout is raised from the chart's 1s for the same reason:
+  # /api/health pings the database, and one second is not a safe budget for a
+  # disk-backed query on a laptop.
+  livenessProbe:
+    httpGet:
+      path: /api/health
+      port: grafana
+    initialDelaySeconds: 60
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30
+
+  readinessProbe:
+    httpGet:
+      path: /api/health
+      port: grafana
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30
+
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      # Watch every namespace so the application chart can ship its own
+      # dashboard alongside the workload it describes.
+      searchNamespace: ALL
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: true
+      searchNamespace: ALL
+
+  # Dashboards and datasources are provisioned from ConfigMaps on every start,
+  # so there is nothing in Grafana's database worth persisting.
+  persistence:
+    enabled: false
+
+  resources:
+    requests:
+      cpu: 25m
+      memory: 128Mi
+    limits:
+      # Measured, not guessed: 256Mi was OOM-killed during Grafana's start-up
+      # migrations, which run before the readiness probe ever passes. Current
+      # Grafana with two sidecars settles around 300Mi.
+      memory: 512Mi
+
+  grafana.ini:
+    server:
+      # Grafana builds its redirects, OAuth callbacks and share links from
+      # root_url. Left at the default it would derive http:// from the request
+      # it received from the ingress, which speaks plaintext to the pod, and
+      # bounce a logged-in operator back to an http URL the browser then has to
+      # be redirected away from again.
+      root_url: https://grafana.localtest.me
+    security:
+      # The session cookie is only ever to be sent over TLS. Grafana cannot
+      # infer this - from its own point of view the connection is plaintext,
+      # because TLS is terminated one hop earlier at the Ingress.
+      cookie_secure: true
+      cookie_samesite: strict
+      content_security_policy: true
+    database:
+      # Grafana keeps its state in SQLite here. Both provisioning sidecars write
+      # to it while the alerting and plugin services do too, and on the overlay
+      # filesystem of a kind node that contention produced SQLITE_BUSY and an
+      # exit code 1 on start-up. Write-ahead logging is Grafana's documented
+      # answer: readers stop blocking the writer, and the restarts stop.
+      wal: true
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+    users:
+      default_theme: dark
+    # Local environment: Grafana is reachable only through the kind host port.
+    # A real deployment puts an identity provider in front of it instead.
+    auth.anonymous:
+      enabled: false
+
+## ---------------------------------------------------------------------------
+## Exporters and operator
+## ---------------------------------------------------------------------------
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 15m
+      memory: 32Mi
+    limits:
+      memory: 96Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 96Mi
+    limits:
+      memory: 256Mi
+  prometheusConfigReloader:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 64Mi

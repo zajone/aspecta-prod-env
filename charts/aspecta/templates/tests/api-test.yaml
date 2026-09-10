@@ -1,0 +1,245 @@
+{{- if .Values.tests.enabled }}
+{{- $frontend := include "aspecta.componentName" (dict "root" . "component" "frontend") }}
+{{- $backend := include "aspecta.componentName" (dict "root" . "component" "backend") }}
+{{/*
+helm test smoke suite.
+
+It exercises the release through the Services exactly as the Ingress controller
+and Prometheus would, so it verifies the wiring rather than the application
+logic (which is covered by the Go unit tests).
+
+The test pod needs its own NetworkPolicy: the namespace denies all traffic by
+default, and that has to apply to a test pod too. The policy is created as an
+earlier hook and removed with the pod.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "aspecta.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  podSelector:
+    matchLabels:
+      aspecta.io/test: "true"
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dnsNamespace }}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "aspecta.selectorLabels" (dict "root" . "component" "frontend") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.frontend.service.port }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "aspecta.selectorLabels" (dict "root" . "component" "backend") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.backend.service.port }}
+        - protocol: TCP
+          port: {{ .Values.backend.service.opsPort }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "aspecta.fullname" . }}-test-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  # Egress from the test pod is not enough: the workloads only accept traffic
+  # from the Ingress controller and from each other. This grants the test pod
+  # ingress as well, for the duration of the test only - the policy is a hook
+  # and is deleted with the pod, so the running environment is never left with
+  # a wider allow-list than it started with.
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [{{ include "aspecta.name" . }}]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name }}]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [frontend, backend]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              aspecta.io/test: "true"
+      ports:
+        - protocol: TCP
+          port: {{ .Values.frontend.service.port }}
+        # The backend API port, spelled out. It was missing and the suite
+        # passed only because it happens to equal the frontend's; changing
+        # either one independently would have broken the tests in a way that
+        # looked like the application was down.
+        - protocol: TCP
+          port: {{ .Values.backend.service.port }}
+        - protocol: TCP
+          port: {{ .Values.backend.service.opsPort }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aspecta.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+data:
+  smoke.sh: |
+    #!/bin/sh
+    set -eu
+
+    FRONTEND="http://{{ $frontend }}:{{ .Values.frontend.service.port }}"
+    BACKEND="http://{{ $backend }}:{{ .Values.backend.service.port }}"
+    OPS="http://{{ $backend }}:{{ .Values.backend.service.opsPort }}"
+    failures=0
+
+    # check <name> <expected status> <url> [method]
+    check() {
+      name="$1"; expected="$2"; url="$3"; method="${4:-GET}"
+      actual="$(curl -sS -o /tmp/body -w '%{http_code}' --max-time 10 -X "$method" "$url" || echo 000)"
+      if [ "$actual" = "$expected" ]; then
+        echo "ok       $name ($expected)"
+      else
+        echo "FAILED   $name: expected $expected, got $actual from $method $url"
+        failures=$((failures + 1))
+      fi
+    }
+
+    # Accepts any status that means "not open". A 2xx here would mean an
+    # unauthenticated caller could drain a replica.
+    closed() {
+      name="$1"; url="$2"
+      actual="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -X POST "$url" || echo 000)"
+      case "$actual" in
+        401 | 501)
+          echo "ok       $name ($actual)"
+          ;;
+        *)
+          echo "FAILED   $name: expected 401 or 501, got $actual from POST $url"
+          failures=$((failures + 1))
+          ;;
+      esac
+    }
+
+    contains() {
+      name="$1"; needle="$2"; url="$3"
+      if curl -sS --max-time 10 "$url" | grep -q "$needle"; then
+        echo "ok       $name"
+      else
+        echo "FAILED   $name: response from $url does not contain '$needle'"
+        failures=$((failures + 1))
+      fi
+    }
+
+    echo "--- frontend ---"
+    check "UI is served"                 200 "$FRONTEND/"
+    check "frontend health endpoint"     200 "$FRONTEND/healthz"
+    contains "UI references the app"     "Aspecta" "$FRONTEND/"
+    check "API reachable through nginx"  200 "$FRONTEND/api/v1/stats"
+
+    echo "--- backend API ---"
+    check "object listing"               200 "$BACKEND/api/v1/objects"
+    check "single object"                200 "$BACKEND/api/v1/objects/m31"
+    check "unknown object is 404"        404 "$BACKEND/api/v1/objects/m999"
+    check "unknown route is 404"         404 "$BACKEND/nope"
+    # The drain control lives on the operations port and must not be reachable
+    # through the API the Ingress publishes.
+    check "no admin route on the api"    404 "$BACKEND/api/v1/admin/maintenance" POST
+    check "no drain route on the api"    404 "$BACKEND/internal/maintenance" POST
+    contains "catalogue is populated"    '"total":2[0-9]' "$BACKEND/api/v1/objects?size=50"
+
+    echo "--- operations port ---"
+    check "liveness"                     200 "$OPS/healthz"
+    check "readiness"                    200 "$OPS/readyz"
+    contains "metrics expose catalogue"  "aspecta_catalogue_objects" "$OPS/metrics"
+    contains "metrics expose build info" "aspecta_build_info" "$OPS/metrics"
+    # Closed either way: 401 when a token is configured, 501 when none is.
+    # Asserting 401 alone failed a plain `helm install`, where the chart
+    # declares the Secret optional and the endpoint is disabled outright.
+    closed "drain control is not open"   "$OPS/internal/maintenance"
+
+    echo
+    if [ "$failures" -ne 0 ]; then
+      echo "$failures check(s) failed"
+      exit 1
+    fi
+    echo "all checks passed"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "aspecta.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+    aspecta.io/test: "true"
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    {{- include "aspecta.podSecurityContext" . | nindent 4 }}
+    runAsUser: 65532
+    runAsGroup: 65532
+  containers:
+    - name: smoke
+      image: {{ .Values.tests.image }}
+      securityContext:
+        {{- include "aspecta.containerSecurityContext" . | nindent 8 }}
+      command: ["/bin/sh", "/scripts/smoke.sh"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: scripts
+      configMap:
+        name: {{ include "aspecta.fullname" . }}-test
+    - name: tmp
+      emptyDir:
+        medium: Memory
+        sizeLimit: 8Mi
+{{- end }}

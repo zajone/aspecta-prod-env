@@ -1,0 +1,16 @@
+# Files that must not travel inside the packaged chart. It is pushed to GHCR
+# as an OCI artifact, so anything left here ships to every consumer.
+.DS_Store
+.git/
+.gitignore
+.idea/
+.vscode/
+*.tmproj
+*.swp
+*.bak
+*.orig
+*~
+# Rendered output and local scratch
+out/
+tmp/
+*.tgz

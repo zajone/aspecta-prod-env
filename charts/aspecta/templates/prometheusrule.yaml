@@ -1,0 +1,380 @@
+{{- if .Values.monitoring.prometheusRule.enabled }}
+{{- $ns := .Release.Namespace }}
+{{- $backend := include "aspecta.componentName" (dict "root" . "component" "backend") }}
+{{- $frontend := include "aspecta.componentName" (dict "root" . "component" "frontend") }}
+{{- $t := .Values.monitoring.prometheusRule.thresholds }}
+{{- $slo := .Values.monitoring.prometheusRule.slo }}
+{{- /* The error budget is what is left of the target: a 99.5% target buys 0.5%.
+       subf, not sub - sub is integer arithmetic and would make every budget 1. */}}
+{{- $budget := printf "%g" (subf 1 $slo.availabilityTarget) }}
+{{- $budgetPct := printf "%g" (mulf (subf 1 $slo.availabilityTarget) 100) }}
+{{- /*
+  Burn-rate thresholds are derived from the window, never written by hand.
+  A burn rate of N means the budget lasts window/N. The published 14.4 and 6
+  are not universal constants - they are what "2% of the budget in 1h" and
+  "5% in 6h" work out to for a *30-day* window. Pasted next to a 3-day window
+  they claimed a two-day burn while the budget was actually gone in about five
+  hours, so the page and its own description disagreed.
+
+  threshold = fraction_of_budget * window_hours / alert_window_hours
+*/}}
+{{- $windowHours := dict "3d" 72.0 "7d" 168.0 "30d" 720.0 }}
+{{- if not (hasKey $windowHours $slo.window) }}
+{{- fail (printf "monitoring.prometheusRule.slo.window=%s is not one of %v" $slo.window (keys $windowHours | sortAlpha)) }}
+{{- end }}
+{{- $w := index $windowHours $slo.window | float64 }}
+{{- $fastBurn := printf "%.4g" (divf (mulf 0.02 $w) 1.0) }}
+{{- $slowBurn := printf "%.4g" (divf (mulf 0.10 $w) 6.0) }}
+{{- /*
+  A burn rate at or below 1 is spending the budget no faster than it refills,
+  so it never exhausts anything and the alert would simply fire forever on any
+  non-zero error rate. That happens whenever the budget window is short, which
+  is why the windows above start at three days. Fail the render rather than
+  ship a permanently firing page.
+*/}}
+{{- if le (float64 $fastBurn) 1.0 }}
+{{- fail (printf "monitoring.prometheusRule.slo.window=%s is too short: it derives a fast burn-rate threshold of %s, and anything at or below 1 never exhausts the budget. Use 3d or longer." $slo.window $fastBurn) }}
+{{- end }}
+{{- $runbook := "https://github.com/zajone/aspecta-prod-env/blob/main/docs/runbook.md" }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "aspecta.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    # Recording rules first: the expensive expressions are evaluated once and
+    # then reused by the alerts and the dashboard, which keeps both consistent
+    # and cheap to evaluate.
+    - name: aspecta.recording
+      interval: 30s
+      rules:
+        # --- RED, aggregated ------------------------------------------------
+        # Every rule below keeps the namespace label. It is constant here - the
+        # rule already restricts to one namespace - but carrying it means the
+        # dashboard filters recorded and raw series with the same expression,
+        # and a second release in another namespace does not silently collide.
+        - record: aspecta:http_requests:rate5m
+          expr: sum by (namespace) (rate(aspecta_http_requests_total{namespace="{{ $ns }}"}[5m]))
+
+        # The `or ... * 0` is load-bearing, not defensive noise. A service that
+        # has never returned a 5xx has no 5xx series at all, and in PromQL an
+        # empty vector divided by anything is empty - so without the fallback
+        # this rule, and every SLO rule derived from it, records nothing at all
+        # while the service is perfectly healthy. The dashboard would show "No
+        # data" on its headline panels exactly when things are fine, which is
+        # indistinguishable from the metric being broken.
+        - record: aspecta:http_request_error_ratio:rate5m
+          expr: |
+            (
+              sum by (namespace) (rate(aspecta_http_requests_total{namespace="{{ $ns }}", status=~"5.."}[5m]))
+                or
+              sum by (namespace) (rate(aspecta_http_requests_total{namespace="{{ $ns }}"}[5m])) * 0
+            )
+              /
+            clamp_min(sum by (namespace) (rate(aspecta_http_requests_total{namespace="{{ $ns }}"}[5m])), 0.001)
+
+        - record: aspecta:http_errors:rate5m
+          expr: |
+            sum by (namespace) (rate(aspecta_http_requests_total{namespace="{{ $ns }}", status=~"5.."}[5m]))
+              or
+            sum by (namespace) (rate(aspecta_http_requests_total{namespace="{{ $ns }}"}[5m])) * 0
+
+        # --- RED, kept dimensional ------------------------------------------
+        # by (route) and by (status) are recorded rather than left to the
+        # dashboard so a panel and an alert can never disagree about what "the
+        # error rate" means. The label sets stay small: route is the registered
+        # pattern and status is a three-digit code, both bounded by the code.
+        - record: aspecta:http_requests_by_route:rate5m
+          expr: sum by (namespace, route) (rate(aspecta_http_requests_total{namespace="{{ $ns }}"}[5m]))
+
+        - record: aspecta:http_requests_by_status_class:rate5m
+          expr: |
+            sum by (namespace, status_class) (
+              label_replace(
+                rate(aspecta_http_requests_total{namespace="{{ $ns }}"}[5m]),
+                "status_class", "${1}xx", "status", "(.)..")
+            )
+
+        # --- Latency ---------------------------------------------------------
+        # Recorded from the same bucket series at three quantiles, so the
+        # dashboard does not re-derive histogram_quantile three times per
+        # refresh over a 30-second scrape interval.
+        {{- range $q := list "50" "95" "99" }}
+        - record: aspecta:http_request_latency_p{{ $q }}:rate5m
+          expr: |
+            histogram_quantile(0.{{ $q }},
+              sum by (namespace, le) (rate(aspecta_http_request_duration_seconds_bucket{namespace="{{ $ns }}"}[5m])))
+        {{- end }}
+
+        - record: aspecta:http_request_latency_p95_by_route:rate5m
+          expr: |
+            histogram_quantile(0.95,
+              sum by (namespace, le, route) (rate(aspecta_http_request_duration_seconds_bucket{namespace="{{ $ns }}"}[5m])))
+
+        # --- Traffic volume and concurrency ----------------------------------
+        - record: aspecta:http_response_bytes:rate5m
+          expr: sum by (namespace) (rate(aspecta_http_response_bytes_total{namespace="{{ $ns }}"}[5m]))
+
+        - record: aspecta:http_requests_in_flight:sum
+          expr: sum by (namespace) (aspecta_http_requests_in_flight{namespace="{{ $ns }}"})
+
+    # ---------------------------------------------------------------------
+    # Service level objective
+    # ---------------------------------------------------------------------
+    # One definition of the objective, recorded once and consumed by the
+    # dashboard, the burn-rate alerts and the error-budget panel alike. The
+    # alternative - the target typed into each panel and each alert - is how a
+    # dashboard ends up reporting a service as healthy while an alert pages.
+    #
+    # The SLI is request availability: the share of requests not answered with
+    # a 5xx. The target is {{ $slo.availabilityTarget }}, so the error budget
+    # is {{ $budget }} of all requests over {{ $slo.window }}.
+    - name: aspecta.slo
+      interval: 30s
+      rules:
+        - record: aspecta:slo_availability_target
+          expr: vector({{ $slo.availabilityTarget }})
+
+        - record: aspecta:slo_error_budget
+          expr: vector({{ $budget }})
+
+        # The error ratio over each window the burn-rate alerts need. Recorded
+        # from the raw counter rather than from the 5m rule above: a rate over
+        # a long window is not the average of rates over short ones.
+        {{- range $w := concat (list "5m" "30m" "1h" "6h") (list $slo.window) | uniq }}
+        - record: aspecta:slo_error_ratio:rate{{ $w }}
+          expr: |
+            (
+              sum by (namespace) (rate(aspecta_http_requests_total{namespace="{{ $ns }}", status=~"5.."}[{{ $w }}]))
+                or
+              sum by (namespace) (rate(aspecta_http_requests_total{namespace="{{ $ns }}"}[{{ $w }}])) * 0
+            )
+              /
+            clamp_min(sum by (namespace) (rate(aspecta_http_requests_total{namespace="{{ $ns }}"}[{{ $w }}])), 0.001)
+        {{- end }}
+
+        # Burn rate: how many times faster than sustainable the budget is being
+        # spent. 1 means the budget lasts exactly to the end of the window; 14.4
+        # means it is gone in about two days of a 30-day window.
+        {{- range $w := list "5m" "30m" "1h" "6h" }}
+        - record: aspecta:slo_burn_rate:{{ $w }}
+          expr: aspecta:slo_error_ratio:rate{{ $w }} / {{ $budget }}
+        {{- end }}
+
+        # What is left of the budget, as a fraction. Clamped at zero: a
+        # spent budget is spent, and a negative number on a gauge reads as a
+        # broken panel rather than as an exhausted objective.
+        - record: aspecta:slo_error_budget_remaining:ratio
+          expr: |
+            clamp_min(1 - (aspecta:slo_error_ratio:rate{{ $slo.window }} / {{ $budget }}), 0)
+
+    - name: aspecta.availability
+      rules:
+        - alert: AspectaBackendDown
+          expr: up{namespace="{{ $ns }}", job="{{ $backend }}"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            component: backend
+          annotations:
+            summary: Aspecta backend replica is not responding to scrapes
+            description: >-
+              Prometheus cannot scrape {{ "{{ $labels.pod }}" }} in namespace {{ $ns }}.
+              The replica is either crash-looping or its operations port is unreachable.
+            runbook_url: {{ $runbook }}#aspectabackenddown
+
+        - alert: AspectaBackendTargetMissing
+          # A vanished target is a different failure from a failing one: it means
+          # the ServiceMonitor, the Service selector or the whole Deployment is
+          # gone, and up{} cannot report zero for something it no longer knows.
+          expr: absent(up{namespace="{{ $ns }}", job="{{ $backend }}"}) == 1
+          for: 5m
+          labels:
+            severity: critical
+            component: backend
+          annotations:
+            summary: Aspecta backend has no scrape target at all
+            description: >-
+              No Prometheus target matches job {{ $backend }} in namespace {{ $ns }}.
+              Check that the Deployment, its Service and the ServiceMonitor still exist.
+            runbook_url: {{ $runbook }}#aspectabackendtargetmissing
+
+        - alert: AspectaDeploymentUnavailable
+          expr: |
+            kube_deployment_status_replicas_available{namespace="{{ $ns }}", deployment=~"{{ $backend }}|{{ $frontend }}"} == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: Aspecta deployment {{ "{{ $labels.deployment }}" }} has no available replica
+            description: >-
+              Every replica of {{ "{{ $labels.deployment }}" }} is unavailable, so the
+              service is down for users even if the pods still exist.
+            runbook_url: {{ $runbook }}#aspectadeploymentunavailable
+
+        - alert: AspectaPodRestartingTooOften
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="{{ $ns }}"}[15m]) > {{ $t.restarts }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Pod {{ "{{ $labels.pod }}" }} restarted more than {{ $t.restarts }} times in 15 minutes
+            description: >-
+              Container {{ "{{ $labels.container }}" }} keeps restarting. A liveness probe
+              is failing or the process exits on start-up.
+            runbook_url: {{ $runbook }}#aspectapodrestartingtoooften
+
+    - name: aspecta.quality-of-service
+      rules:
+        - alert: AspectaHighErrorRate
+          expr: aspecta:http_request_error_ratio:rate5m > {{ $t.errorRatio }}
+          for: 5m
+          labels:
+            severity: warning
+            component: backend
+          annotations:
+            summary: More than {{ mulf $t.errorRatio 100 }}% of Aspecta requests are failing
+            description: >-
+              The backend answered {{ "{{ $value | humanizePercentage }}" }} of requests with a
+              5xx status over the last five minutes.
+            runbook_url: {{ $runbook }}#aspectahigherrorrate
+
+        - alert: AspectaHighLatency
+          expr: aspecta:http_request_latency_p95:rate5m > {{ $t.latencyP95 }}
+          for: 10m
+          labels:
+            severity: warning
+            component: backend
+          annotations:
+            summary: Aspecta p95 latency is above {{ $t.latencyP95 }}s
+            description: >-
+              p95 request latency is {{ "{{ $value | humanizeDuration }}" }}. The catalogue is
+              served from memory, so a sustained value this high points at CPU
+              starvation or a saturated node rather than at the application.
+            runbook_url: {{ $runbook }}#aspectahighlatency
+
+        - alert: AspectaAutoscalerAtMaximum
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{namespace="{{ $ns }}"}
+              >=
+            kube_horizontalpodautoscaler_spec_max_replicas{namespace="{{ $ns }}"}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: HorizontalPodAutoscaler {{ "{{ $labels.horizontalpodautoscaler }}" }} is pinned at its maximum
+            description: >-
+              The autoscaler has been at maxReplicas for 15 minutes and has no
+              headroom left. Raise maxReplicas or investigate why load is this high.
+            runbook_url: {{ $runbook }}#aspectaautoscaleratmaximum
+
+    - name: aspecta.slo-burn
+      rules:
+        # The multi-window, multi-burn-rate pattern from the SRE workbook. Two
+        # windows per alert, and the alert only fires when both agree: the long
+        # window establishes that the budget is genuinely being consumed, the
+        # short one that it is still happening now. Without the short window an
+        # alert keeps firing for hours after a brief incident has ended.
+        - alert: AspectaErrorBudgetBurningFast
+          # 2% of the {{ $slo.window }} budget in one hour.
+          expr: |
+            aspecta:slo_burn_rate:1h > {{ $fastBurn }}
+              and
+            aspecta:slo_burn_rate:5m > {{ $fastBurn }}
+          for: 2m
+          labels:
+            severity: critical
+            component: backend
+          annotations:
+            summary: Aspecta is burning its error budget {{ $fastBurn }}x faster than sustainable
+            description: >-
+              At this rate the {{ $slo.window }} error budget of
+              {{ $budgetPct }}% is exhausted in about
+              {{ divf 1 (float64 $fastBurn) | printf "%.1f" }} of the window.
+              Current burn rate: {{ "{{ $value | printf \"%.1f\" }}" }}x.
+            runbook_url: {{ $runbook }}#aspectaerrorbudgetburningfast
+
+        - alert: AspectaErrorBudgetBurningSlow
+          # 10% of the {{ $slo.window }} budget in six hours: too slow to page
+          # on, too fast to leave until the budget is gone.
+          expr: |
+            aspecta:slo_burn_rate:6h > {{ $slowBurn }}
+              and
+            aspecta:slo_burn_rate:30m > {{ $slowBurn }}
+          for: 15m
+          labels:
+            severity: warning
+            component: backend
+          annotations:
+            summary: Aspecta is burning its error budget {{ $slowBurn }}x faster than sustainable
+            description: >-
+              Sustained elevated errors over six hours. Not an outage, but the
+              {{ $slo.window }} budget will not survive at this rate.
+              Current burn rate: {{ "{{ $value | printf \"%.1f\" }}" }}x.
+            runbook_url: {{ $runbook }}#aspectaerrorbudgetburningslow
+
+        - alert: AspectaErrorBudgetExhausted
+          expr: aspecta:slo_error_budget_remaining:ratio == 0
+          for: 5m
+          labels:
+            severity: warning
+            component: backend
+          annotations:
+            summary: Aspecta has no error budget left for this window
+            description: >-
+              The {{ $slo.window }} error budget is fully spent. By the objective's
+              own terms this is the point at which releases stop and reliability
+              work takes priority.
+            runbook_url: {{ $runbook }}#aspectaerrorbudgetexhausted
+
+    - name: aspecta.application
+      rules:
+        # Application-specific invariants. These are the alerts a generic
+        # infrastructure dashboard cannot produce, because only the service
+        # knows what a correct catalogue looks like.
+        - alert: AspectaCatalogueEmpty
+          expr: min(aspecta_catalogue_objects{namespace="{{ $ns }}"}) == 0
+          for: 1m
+          labels:
+            severity: critical
+            component: backend
+          annotations:
+            summary: Aspecta is serving an empty catalogue
+            description: >-
+              A replica reports zero catalogue objects, which means a broken image
+              reached production. Roll back to the previous chart revision.
+            runbook_url: {{ $runbook }}#aspectacatalogueempty
+
+        - alert: AspectaCatalogueRevisionMismatch
+          expr: count(count by (version) (aspecta_build_info{namespace="{{ $ns }}"})) > 1
+          for: 15m
+          labels:
+            severity: warning
+            component: backend
+          annotations:
+            summary: More than one Aspecta version is running at once
+            description: >-
+              Replicas report different build versions for 15 minutes, so a rollout
+              is stuck half-finished. Check the Argo CD sync status and the rollout.
+            runbook_url: {{ $runbook }}#aspectacataloguerevisionmismatch
+
+        - alert: AspectaMaintenanceModeLeftOn
+          expr: max(aspecta_maintenance_mode{namespace="{{ $ns }}"}) == 1
+          for: 30m
+          labels:
+            severity: warning
+            component: backend
+          annotations:
+            summary: Aspecta has been in maintenance mode for 30 minutes
+            description: >-
+              A replica is still draining itself through the admin endpoint. If the
+              maintenance window is over, turn it off so the replica serves traffic again.
+            runbook_url: {{ $runbook }}#aspectamaintenancemodelefton
+{{- end }}

@@ -1,0 +1,19 @@
+{{- range $component, $spec := dict "backend" .Values.backend "frontend" .Values.frontend }}
+{{- if $spec.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "aspecta.componentName" (dict "root" $ "component" $component) }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "aspecta.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
+spec:
+  # Guards voluntary disruptions such as a node drain during a cluster upgrade:
+  # the node is allowed to drain, but not at the cost of the last replica.
+  minAvailable: {{ $spec.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "aspecta.selectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
+{{- end }}
+{{- end }}

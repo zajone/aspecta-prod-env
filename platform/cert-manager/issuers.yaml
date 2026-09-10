@@ -1,0 +1,96 @@
+# The certificate authority of this environment.
+#
+# Three objects, in the order cert-manager consumes them:
+#
+#   1. selfsigned-bootstrap  - a ClusterIssuer that signs with the key it is
+#                              given. Used exactly once, to sign the root below.
+#   2. aspecta-ca            - the root certificate itself, a real CA
+#                              certificate (isCA: true) stored in the
+#                              aspecta-ca-root Secret in this namespace.
+#   3. aspecta-ca            - a ClusterIssuer backed by that Secret. Every
+#                              leaf certificate in the cluster is signed by it.
+#
+# One root means one certificate for an operator to trust on their machine
+# (`make trust-ca`), after which every host in the environment validates
+# normally - no curl -k, no clicking through a browser warning. Rotating the
+# root is a matter of deleting the aspecta-ca-root Secret: cert-manager mints a
+# new one and re-signs every leaf from it.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-bootstrap
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: aspecta-ca
+  # Lives in cert-manager's namespace because a ClusterIssuer reads its signing
+  # key from the namespace cert-manager itself runs in.
+  namespace: cert-manager
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  isCA: true
+  commonName: Aspecta Environment Root CA
+  secretName: aspecta-ca-root
+  # Ten years: this root is trusted by hand on operator machines, so a short
+  # lifetime would mean re-trusting it rather than any real security gain. The
+  # leaf certificates it signs are the short-lived ones.
+  duration: 87600h
+  renewBefore: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: selfsigned-bootstrap
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: aspecta-ca
+  annotations:
+    # After the root Certificate above, whose Secret this issuer reads.
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  ca:
+    secretName: aspecta-ca-root
+---
+# The certificate ingress-nginx falls back to for any request whose Host header
+# matches no Ingress.
+#
+# Without it, nginx answers such requests with its own built-in
+# "Kubernetes Ingress Controller Fake Certificate", which is untrusted and
+# expires on its own schedule. Pointing default-ssl-certificate at a wildcard
+# from our own CA means every TLS handshake on this cluster - including the ones
+# that then get a 404 - presents a certificate the operator's machine trusts.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: default-wildcard
+  namespace: ingress-nginx
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  secretName: default-wildcard-tls
+  # 90 days with renewal at 60, the same shape as a Let's Encrypt certificate,
+  # so the renewal path is exercised here exactly as it would be in production.
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - "*.localtest.me"
+    - localtest.me
+  issuerRef:
+    name: aspecta-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

@@ -1,0 +1,41 @@
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "aspecta.componentName" (dict "root" . "component" "backend") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.componentLabels" (dict "root" . "component" "backend") | nindent 4 }}
+    {{- with .Values.monitoring.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # Prometheus discovers this through its serviceMonitorSelectorNilUsesHelmValues
+  # setting in platform/monitoring/values.yaml, which selects every
+  # ServiceMonitor in the cluster - no extra release label needed here.
+  selector:
+    matchLabels:
+      {{- include "aspecta.selectorLabels" (dict "root" . "component" "backend") | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    # Scraped on the operations port, which the NetworkPolicy opens only to the
+    # monitoring namespace.
+    - port: http-ops
+      path: /metrics
+      scheme: http
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout }}
+      relabelings:
+        # Keep the pod name as an explicit label so a single misbehaving replica
+        # can be identified from a dashboard.
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+          action: replace
+      metricRelabelings:
+        # Go runtime internals are not worth the storage in this environment.
+        - sourceLabels: [__name__]
+          regex: go_memstats_(alloc_bytes_total|frees_total|lookups_total|mallocs_total)
+          action: drop
+{{- end }}

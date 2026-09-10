@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aspecta — deep-sky catalogue</title>
+  <meta name="description" content="Aspecta is a small deep-sky object catalogue served from a Kubernetes production environment.">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+  <a class="skip" href="#results">Skip to results</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <div>
+        <h1>Aspecta</h1>
+        <p id="banner" class="banner">Loading catalogue…</p>
+      </div>
+    </div>
+    <dl class="build" aria-label="Build information">
+      <div><dt>Version</dt><dd id="meta-version">—</dd></div>
+      <div><dt>Catalogue</dt><dd id="meta-revision">—</dd></div>
+      <div><dt>Objects</dt><dd id="meta-objects">—</dd></div>
+      <div><dt>Uptime</dt><dd id="meta-uptime">—</dd></div>
+    </dl>
+  </header>
+
+  <main>
+    <section class="panel" aria-labelledby="filters-heading">
+      <h2 id="filters-heading" class="sr-only">Filters</h2>
+      <form id="filters" class="filters" autocomplete="off">
+        <div class="field grow">
+          <label for="q">Search</label>
+          <input id="q" name="q" type="search" placeholder="orion, galaxy, Messier, Halley…" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="type">Type</label>
+          <select id="type" name="type"><option value="">All types</option></select>
+        </div>
+        <div class="field">
+          <label for="constellation">Constellation</label>
+          <select id="constellation" name="constellation"><option value="">All constellations</option></select>
+        </div>
+        <div class="field">
+          <label for="size">Per page</label>
+          <select id="size" name="size">
+            <option value="6">6</option>
+            <option value="12" selected>12</option>
+            <option value="24">24</option>
+          </select>
+        </div>
+        <button type="reset" class="ghost">Reset</button>
+      </form>
+    </section>
+
+    <div class="layout">
+      <section id="results" class="results" aria-labelledby="results-heading" aria-busy="true">
+        <div class="results-head">
+          <h2 id="results-heading">Objects</h2>
+          <p id="result-count" class="count" role="status">…</p>
+        </div>
+        <ul id="cards" class="cards"></ul>
+        <nav class="pager" aria-label="Pagination">
+          <button id="prev" type="button" class="ghost" disabled>Previous</button>
+          <span id="page-label">page 1</span>
+          <button id="next" type="button" class="ghost" disabled>Next</button>
+        </nav>
+      </section>
+
+      <aside class="sidebar">
+        <section class="panel" aria-labelledby="alerts-heading">
+          <h2 id="alerts-heading">Alertmanager feed</h2>
+          <p class="hint">Alerts delivered to this service by the in-cluster Alertmanager webhook receiver.</p>
+          <ul id="alerts" class="alerts"><li class="empty">Waiting for the first notification…</li></ul>
+        </section>
+
+        <section class="panel" aria-labelledby="mix-heading">
+          <h2 id="mix-heading">Catalogue mix</h2>
+          <ul id="mix" class="mix"></ul>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <footer>
+    <p>Aspecta runs on Kubernetes: Deployment, ClusterIP Service and Ingress, configured by ConfigMap and Secret, delivered by Argo CD and observed by Prometheus.</p>
+  </footer>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

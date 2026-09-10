@@ -1,0 +1,41 @@
+# Values for the app-of-apps.
+#
+# repoURL, targetRevision and imageOwner are passed in by scripts/bootstrap.sh,
+# which reads them from `git remote`. That is what lets a fork of this
+# repository deploy itself without a single file being edited.
+repoURL: https://github.com/zajone/aspecta-prod-env.git
+targetRevision: main
+imageOwner: zajone
+
+destinationServer: https://kubernetes.default.svc
+
+# Set to false (make up MONITORING=off) to leave the observability stack out on
+# a machine with little RAM. The application chart's ServiceMonitor, alert rules
+# and dashboard are then disabled too, because their CRDs would not exist.
+monitoring: true
+
+# Upstream chart versions are pinned. An unpinned dependency turns any upstream
+# release into an unreviewed change to production.
+charts:
+  certManager:
+    repo: https://charts.jetstack.io
+    version: v1.21.1
+  prometheusOperatorCrds:
+    repo: https://prometheus-community.github.io/helm-charts
+    version: 31.0.1
+  ingressNginx:
+    repo: https://kubernetes.github.io/ingress-nginx
+    version: 4.15.1
+  metricsServer:
+    repo: https://kubernetes-sigs.github.io/metrics-server
+    version: 3.14.0
+  kubePrometheusStack:
+    repo: https://prometheus-community.github.io/helm-charts
+    version: 90.0.0
+
+# Argo CD prunes and self-heals by default here: the cluster is not allowed to
+# drift from git, and a manual kubectl edit is reverted within the
+# reconciliation interval.
+syncPolicy:
+  prune: true
+  selfHeal: true

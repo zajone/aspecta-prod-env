@@ -1,0 +1,107 @@
+# Argo CD, trimmed to what this environment needs.
+#
+# Installed once by scripts/bootstrap.sh - the single imperative step in the
+# whole setup. Everything Argo CD itself deploys afterwards comes from git.
+global:
+  # HA is out of scope for a single-node laptop cluster; a real cluster would
+  # run the controller, repo-server and API server with several replicas.
+  domain: argocd.localtest.me
+
+crds:
+  install: true
+  keep: false
+
+configs:
+  params:
+    # TLS is terminated at the Ingress, which holds a certificate from this
+    # environment's CA; from there to the pod the traffic stays on the node.
+    # Argo CD's own TLS is therefore off - running it as well produces the
+    # classic ingress-nginx/Argo CD redirect loop, where nginx speaks HTTP to a
+    # backend that answers every HTTP request with a 307 to HTTPS.
+    #
+    # Nothing reaches this port from outside the cluster: the Service is
+    # ClusterIP and the only route in is the Ingress configured under server
+    # below, which never serves plaintext.
+    server.insecure: true
+    # One repository, one application set - the defaults are oversized here.
+    controller.status.processors: "4"
+    controller.operation.processors: "2"
+    reposerver.parallelism.limit: "2"
+
+  cm:
+    # Argo CD compares live and desired state every three minutes; the webhook
+    # from GitHub is not available for a cluster behind a laptop NAT.
+    timeout.reconciliation: 180s
+    # Hide the noise that makes every application look permanently out of sync.
+    resource.compareoptions: |
+      ignoreAggregatedRoles: true
+      ignoreResourceStatusField: all
+
+  # Locks the UI and API to the roles this environment needs. The default
+  # policy for any authenticated user is read-only; nobody but admin can sync
+  # or delete an application.
+  rbac:
+    policy.default: role:readonly
+    policy.csv: |
+      p, role:aspecta-operator, applications, get, aspecta/*, allow
+      p, role:aspecta-operator, applications, sync, aspecta/*, allow
+      p, role:aspecta-operator, logs, get, aspecta/*, allow
+      g, aspecta-operators, role:aspecta-operator
+
+server:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hostname: argocd.localtest.me
+    path: /
+    pathType: Prefix
+    # Adds the tls block for the hostname above. The chart's secret name for it
+    # is fixed at argocd-server-tls, which is also the secret argocd-server
+    # would read to serve TLS itself - harmless here, because server.insecure
+    # above means it never looks.
+    tls: true
+    annotations:
+      cert-manager.io/cluster-issuer: aspecta-ca
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+  resources:
+    requests:
+      cpu: 25m
+      memory: 96Mi
+    limits:
+      memory: 256Mi
+
+controller:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+
+repoServer:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 96Mi
+    limits:
+      memory: 384Mi
+
+applicationSet:
+  # Not used: this repository uses a plain app-of-apps, which is easier to read
+  # than a generator for four applications.
+  enabled: false
+
+notifications:
+  enabled: false
+
+dex:
+  # No external identity provider in a local cluster.
+  enabled: false
+
+redis:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 160Mi

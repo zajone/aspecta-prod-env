@@ -1,0 +1,37 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metrics-server
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  sources:
+    - repoURL: {{ .Values.charts.metricsServer.repo | quote }}
+      chart: metrics-server
+      targetRevision: {{ .Values.charts.metricsServer.version | quote }}
+      helm:
+        releaseName: metrics-server
+        {{- if not .Values.monitoring }}
+        parameters:
+          # No monitoring stack means no ServiceMonitor CRD to create one with.
+          - name: serviceMonitor.enabled
+            value: "false"
+        {{- end }}
+        valueFiles:
+          - $values/platform/metrics-server/values.yaml
+    - repoURL: {{ .Values.repoURL | quote }}
+      targetRevision: {{ .Values.targetRevision | quote }}
+      ref: values
+  destination:
+    server: {{ .Values.destinationServer }}
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: {{ .Values.syncPolicy.prune }}
+      selfHeal: {{ .Values.syncPolicy.selfHeal }}
+    syncOptions:
+      - ServerSideApply=true

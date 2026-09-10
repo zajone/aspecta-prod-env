@@ -1,0 +1,204 @@
+# Production values for the Aspecta environment.
+#
+# This chart has a single set of values on purpose: the repository describes one
+# environment - production - so there is no dev/stage values file to drift out of
+# sync. The one value that a fork must change, the image owner, is injected by
+# the Argo CD Application, which reads it from `git remote`; everything else,
+# the Ingress host included, is the same on every clone and lives here.
+
+global:
+  image:
+    registry: ghcr.io
+    # Container images are published under the owner of this repository. The
+    # bootstrap script and the CI pipeline both derive this from the git remote,
+    # so a fork works without editing any file.
+    owner: zajone
+    pullPolicy: IfNotPresent
+    pullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Non-secret application configuration, mounted as environment variables from a
+# ConfigMap. A change here rolls the pods, because the Deployment carries a
+# checksum annotation of the rendered ConfigMap.
+config:
+  banner: "Aspecta deep-sky catalogue - production"
+  logLevel: info
+  logFormat: json
+  pageSizeDefault: 12
+  pageSizeMax: 50
+  featureSearch: true
+  alertBufferSize: 50
+  drainDelay: 5s
+  shutdownTimeout: 15s
+
+# Admin token for the privileged maintenance endpoint.
+#
+# No credential is rendered from git. The Secret named below is created out of
+# band with a random value by scripts/bootstrap.sh, and the containers mount it
+# with optional: true - so a cluster without it simply keeps the privileged
+# endpoint closed (HTTP 501) instead of failing to start. In a real cluster the
+# same Secret would be produced by the External Secrets Operator or Sealed
+# Secrets; see docs/security.md.
+#
+# Set create: true together with adminToken only for a throwaway standalone
+# helm install, never in a repository that is pushed anywhere.
+secret:
+  create: false
+  existingSecret: aspecta-admin
+  adminToken: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+backend:
+  image:
+    repository: aspecta-backend
+    # Empty means "use the chart appVersion", which CI keeps in step with the
+    # published image tag.
+    tag: ""
+  replicaCount: 2
+  service:
+    port: 8080
+    opsPort: 9090
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      # No CPU limit: the workload is latency sensitive and CPU throttling on a
+      # bursty request path hurts p95 far more than it protects the node. The
+      # memory limit is what actually prevents a noisy neighbour.
+      memory: 128Mi
+      ephemeral-storage: 256Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector: {}
+  tolerations: []
+  podAnnotations: {}
+
+frontend:
+  image:
+    repository: aspecta-frontend
+    tag: ""
+  replicaCount: 2
+  service:
+    port: 8080
+  resources:
+    requests:
+      cpu: 10m
+      memory: 24Mi
+    limits:
+      memory: 96Mi
+      ephemeral-storage: 256Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 75
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector: {}
+  tolerations: []
+  podAnnotations: {}
+
+ingress:
+  enabled: true
+  className: nginx
+  # *.localtest.me resolves to 127.0.0.1 from public DNS, so the same host works
+  # on WSL, macOS and Linux with no /etc/hosts entry.
+  host: aspecta.localtest.me
+  annotations:
+    # Tighter than the controller-wide defaults in
+    # platform/ingress-nginx/values.yaml: this route serves a small JSON API
+    # and a handful of static files, so nothing legitimate needs more.
+    nginx.ingress.kubernetes.io/proxy-body-size: 64k
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "15"
+    # cert-manager watches this annotation and issues the certificate named by
+    # tls.secretName below for tls.hosts - no Certificate object to maintain
+    # alongside the Ingress, and no way for the two to disagree about the
+    # hostname.
+    cert-manager.io/cluster-issuer: aspecta-ca
+    # Redundant with the controller-wide force-ssl-redirect, and kept anyway:
+    # this Ingress must not start answering plaintext because someone relaxed a
+    # default in the platform values.
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+  tls:
+    enabled: true
+    secretName: aspecta-tls
+
+# Namespace-scoped RBAC. The workloads themselves need no API access at all;
+# these roles exist for the humans and automation that operate the service.
+rbac:
+  create: true
+  viewer:
+    enabled: true
+    # Bound to a ServiceAccount by default so the restriction can be proven with
+    # kubectl auth can-i without needing a real user certificate.
+    createServiceAccount: true
+    subjects: []
+  operator:
+    enabled: true
+    createServiceAccount: true
+    subjects: []
+
+networkPolicy:
+  enabled: true
+  # Namespaces are matched by the kubernetes.io/metadata.name label, which the
+  # API server maintains on every namespace.
+  ingressNamespace: ingress-nginx
+  monitoringNamespace: monitoring
+  dnsNamespace: kube-system
+  kubeletProbes:
+    # Only needed on a CNI that enforces policy on node-to-pod traffic. See the
+    # comment in templates/networkpolicy.yaml before turning this on.
+    enabled: false
+    nodeCidr: ""
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+  prometheusRule:
+    enabled: true
+    labels: {}
+    # The service level objective, in one place. Recorded as Prometheus rules
+    # (aspecta:slo_*) so the dashboard, the burn-rate alerts and the error
+    # budget panel all read the same number instead of each carrying a copy.
+    slo:
+      # Share of requests that must not fail with a 5xx. 99.5% over 30 days is
+      # about 3.6 hours of total unavailability, or the same error mass spread
+      # thinner - which is the point of measuring requests rather than uptime.
+      availabilityTarget: 0.995
+      # The window the budget is accounted over. Must be one of the windows the
+      # recording rules compute: 5m, 30m, 1h, 6h, 1d, 3d.
+      window: 3d
+    thresholds:
+      # Fraction of requests answered with 5xx before the alert fires.
+      errorRatio: 0.05
+      # p95 latency in seconds.
+      latencyP95: 0.5
+      # Container restarts within 15 minutes.
+      restarts: 3
+  grafanaDashboard:
+    enabled: true
+    # Label the Grafana sidecar watches to import dashboards from ConfigMaps.
+    sidecarLabel: grafana_dashboard
+    sidecarLabelValue: "1"
+
+tests:
+  # helm test runs a short-lived pod that exercises the API through the Service.
+  enabled: true
+  image: curlimages/curl:8.11.1

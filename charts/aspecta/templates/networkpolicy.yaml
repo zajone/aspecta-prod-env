@@ -1,0 +1,135 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullname := include "aspecta.fullname" . }}
+{{/*
+Zero-trust networking for the namespace, built from four policies.
+
+Kubernetes NetworkPolicies are additive allow-lists, so the pattern is always
+the same: deny everything first, then reopen the single flows the design needs.
+Every rule below is a design statement that can be tested - see
+scripts/verify-security.sh.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-default-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+spec:
+  # An empty selector means every pod in the namespace, including pods added
+  # later by someone else.
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.componentLabels" (dict "root" . "component" "frontend") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "aspecta.selectorLabels" (dict "root" . "component" "frontend") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Only the Ingress controller may reach the UI. A pod in another namespace
+    # cannot, even though the Service is a normal ClusterIP.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.frontend.service.port }}
+  egress:
+    # Cluster DNS, needed to resolve the backend Service name.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dnsNamespace }}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The API it proxies to - and nothing else. No internet egress.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "aspecta.selectorLabels" (dict "root" . "component" "backend") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.backend.service.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.componentLabels" (dict "root" . "component" "backend") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "aspecta.selectorLabels" (dict "root" . "component" "backend") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # The API port is reachable from the frontend pods only.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "aspecta.selectorLabels" (dict "root" . "component" "frontend") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.backend.service.port }}
+    # The operations port - metrics, probes and the Alertmanager webhook - is
+    # reachable from the monitoring namespace only. This is the cross-namespace
+    # flow the environment actually needs, and it is opened on one port for one
+    # namespace rather than for the whole cluster.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.backend.service.opsPort }}
+  # No egress rules at all. The catalogue is compiled into the binary, so the
+  # backend opens no outbound connection - not even DNS. Anything it tried to
+  # reach after a compromise would be dropped by the CNI.
+  egress: []
+{{- if .Values.networkPolicy.kubeletProbes.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-kubelet-probes
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+spec:
+  # Escape hatch, disabled by default.
+  #
+  # Kubelet probes originate from the node itself. Most CNIs (Cilium, Calico,
+  # kindnet) exempt host-to-pod traffic from NetworkPolicy, so probes keep
+  # working under the default-deny rule and this policy is unnecessary. Where a
+  # CNI does enforce it, enable this and set nodeCidr to the node network only -
+  # never to 0.0.0.0/0, which would reopen the ports to every pod in the
+  # cluster and defeat the two policies above.
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: {{ required "networkPolicy.kubeletProbes.nodeCidr is required" .Values.networkPolicy.kubeletProbes.nodeCidr }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.backend.service.opsPort }}
+        - protocol: TCP
+          port: {{ .Values.frontend.service.port }}
+{{- end }}
+{{- end }}

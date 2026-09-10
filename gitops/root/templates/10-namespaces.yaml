@@ -1,0 +1,33 @@
+{{/*
+Namespaces, including their Pod Security Admission labels, are themselves under
+GitOps control. The bootstrap script applies the same file once so that Argo CD
+has somewhere to install to; from then on this Application owns it, and a
+namespace whose PSA label someone lowered by hand is corrected automatically.
+*/}}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: namespaces
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: {{ .Values.repoURL | quote }}
+    targetRevision: {{ .Values.targetRevision | quote }}
+    path: platform
+    directory:
+      recurse: false
+      include: namespaces.yaml
+  destination:
+    server: {{ .Values.destinationServer }}
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: {{ .Values.syncPolicy.selfHeal }}
+    syncOptions:
+      - ServerSideApply=true

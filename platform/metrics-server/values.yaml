@@ -1,0 +1,27 @@
+# metrics-server supplies the CPU metrics the HorizontalPodAutoscalers consume.
+# kind does not ship it, and without it every HPA reports <unknown>/70%.
+replicas: 1
+
+args:
+  # kubelet serving certificates in kind are signed by the cluster CA but issued
+  # for names metrics-server cannot verify, so verification is skipped for this
+  # local cluster. On a managed cluster this flag must be removed.
+  - --kubelet-insecure-tls
+  - --kubelet-preferred-address-types=InternalIP,Hostname
+  - --metric-resolution=15s
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    memory: 192Mi
+
+metrics:
+  enabled: true
+
+serviceMonitor:
+  enabled: true
+
+podDisruptionBudget:
+  enabled: false

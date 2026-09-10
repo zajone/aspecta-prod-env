@@ -1,0 +1,71 @@
+# Namespaces with Pod Security Admission levels.
+#
+# PSA is the cluster-side counterpart to the securityContext in the chart: even
+# if a manifest asked for a privileged container, the API server would reject it
+# in the aspecta namespace. The levels differ per namespace because the
+# components genuinely differ - node-exporter has to mount the host filesystem,
+# the application must not be able to.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aspecta
+  labels:
+    app.kubernetes.io/part-of: aspecta
+    # restricted: non-root, no privilege escalation, seccomp required.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/part-of: aspecta
+    # privileged is required by prometheus-node-exporter, which mounts /proc,
+    # /sys and the host root filesystem to read node-level metrics.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingress-nginx
+  labels:
+    app.kubernetes.io/part-of: aspecta
+    # privileged, and only because of one field: the Baseline standard forbids
+    # hostPort entirely, and this controller binds host ports 80 and 443 on the
+    # node - which is how traffic reaches the cluster at all in kind. Enforcing
+    # baseline here makes the API server refuse to create the controller pod.
+    # audit and warn stay at baseline so any *other* deviation still shows up
+    # in the audit log instead of being silently allowed.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    app.kubernetes.io/part-of: aspecta
+    # restricted, and it holds: the controller, the webhook and cainjector all
+    # run as non-root with seccomp set out of the box, so nothing here needs a
+    # weaker level. The namespace that stores the environment's CA private key
+    # is the last place to relax one.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+  labels:
+    app.kubernetes.io/part-of: aspecta
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

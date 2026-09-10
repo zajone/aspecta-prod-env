@@ -1,0 +1,53 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aspecta
+  namespace: argocd
+  annotations:
+    # Wave 4: last, once the platform it depends on is healthy.
+    argocd.argoproj.io/sync-wave: "4"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # The locked-down project: this application cannot leave the aspecta
+  # namespace and cannot create a Secret or any cluster-scoped object.
+  project: aspecta
+  source:
+    repoURL: {{ .Values.repoURL | quote }}
+    targetRevision: {{ .Values.targetRevision | quote }}
+    path: charts/aspecta
+    helm:
+      releaseName: aspecta
+      # The chart's own values.yaml is the production configuration. Only the
+      # registry owner is injected, because it is the one value that differs
+      # between this repository and a fork of it.
+      parameters:
+        - name: global.image.owner
+          value: {{ .Values.imageOwner | quote }}
+        {{- if not .Values.monitoring }}
+        # Without the monitoring stack there are no Prometheus Operator CRDs,
+        # so the objects that depend on them are switched off rather than left
+        # to fail the sync.
+        - name: monitoring.serviceMonitor.enabled
+          value: "false"
+        - name: monitoring.prometheusRule.enabled
+          value: "false"
+        - name: monitoring.grafanaDashboard.enabled
+          value: "false"
+        {{- end }}
+  destination:
+    server: {{ .Values.destinationServer }}
+    namespace: aspecta
+  syncPolicy:
+    automated:
+      prune: {{ .Values.syncPolicy.prune }}
+      selfHeal: {{ .Values.syncPolicy.selfHeal }}
+    syncOptions:
+      - ServerSideApply=true
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

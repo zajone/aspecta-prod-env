@@ -1,0 +1,19 @@
+{
+  // Helm templates are not plain YAML; pointing the YAML language server at
+  // them produces nothing but false errors.
+  "yaml.schemas": {
+    "https://json.schemastore.org/chart.json": ["charts/*/Chart.yaml"],
+    "https://json.schemastore.org/github-workflow.json": [".github/workflows/*.yaml"]
+  },
+  "files.associations": {
+    "charts/**/templates/**/*.yaml": "helm",
+    "*.tpl": "helm"
+  },
+  "yaml.customTags": ["!reference sequence"],
+  "[go]": {
+    "editor.formatOnSave": true
+  },
+  "gopls": {
+    "build.directoryFilters": ["-bin"]
+  }
+}

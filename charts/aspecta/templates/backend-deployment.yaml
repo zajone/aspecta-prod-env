@@ -1,0 +1,133 @@
+{{- $component := "backend" }}
+{{- $name := include "aspecta.componentName" (dict "root" . "component" $component) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.componentLabels" (dict "root" . "component" $component) | nindent 4 }}
+spec:
+  {{- if not .Values.backend.autoscaling.enabled }}
+  replicas: {{ .Values.backend.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the desired replica count during a rollout: capacity is
+      # added first, then old pods are retired.
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "aspecta.selectorLabels" (dict "root" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "aspecta.componentLabels" (dict "root" . "component" $component) | nindent 8 }}
+      annotations:
+        # Rolls the pods whenever the ConfigMap content changes, which a plain
+        # envFrom reference would not do on its own.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.backend.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "aspecta.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "aspecta.podSecurityContext" . | nindent 8 }}
+        # uid/gid 65532 is the nonroot user of the distroless base image.
+        runAsUser: 65532
+        runAsGroup: 65532
+      # Long enough for the in-process drain (DRAIN_DELAY) plus the graceful
+      # shutdown of in-flight requests.
+      terminationGracePeriodSeconds: 30
+      # Spread replicas across nodes so a single node failure cannot take the
+      # whole service down. ScheduleAnyway keeps a single-node cluster working.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "aspecta.selectorLabels" (dict "root" . "component" $component) | nindent 14 }}
+      {{- with .Values.global.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.backend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.backend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: backend
+          image: {{ include "aspecta.image" (dict "root" . "component" .Values.backend) }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          securityContext:
+            {{- include "aspecta.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.service.port }}
+              protocol: TCP
+            - name: http-ops
+              containerPort: {{ .Values.backend.service.opsPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "aspecta.fullname" . }}-config
+            - secretRef:
+                name: {{ include "aspecta.secretName" . }}
+                # Optional: without the Secret the privileged endpoint stays
+                # disabled, which is preferable to a pod that will not start.
+                optional: true
+          env:
+            - name: PORT
+              value: {{ .Values.backend.service.port | quote }}
+            - name: OPS_PORT
+              value: {{ .Values.backend.service.opsPort | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          # Probes live on the operations port, which is not exposed through the
+          # Ingress. Liveness only asks whether the process is healthy; it must
+          # not fail while the pod is deliberately draining, or Kubernetes would
+          # kill it mid-shutdown.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http-ops
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http-ops
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http-ops
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          volumeMounts:
+            # The root filesystem is read-only; the binary needs nothing else,
+            # but a writable /tmp keeps the Go runtime happy if it ever needs it.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

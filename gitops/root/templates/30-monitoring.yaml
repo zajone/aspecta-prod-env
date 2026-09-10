@@ -1,0 +1,59 @@
+{{- if .Values.monitoring }}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  annotations:
+    # Wave 3: after ingress-nginx, because the Ingress objects this stack
+    # creates only become healthy once a controller has claimed them.
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  sources:
+    - repoURL: {{ .Values.charts.kubePrometheusStack.repo | quote }}
+      chart: kube-prometheus-stack
+      targetRevision: {{ .Values.charts.kubePrometheusStack.version | quote }}
+      helm:
+        releaseName: kps
+        valueFiles:
+          - $values/platform/monitoring/values.yaml
+        parameters:
+          # The CRDs come from the prometheus-operator-crds Application in wave
+          # -1, so this chart must not manage them as well.
+          - name: crds.enabled
+            value: "false"
+    - repoURL: {{ .Values.repoURL | quote }}
+      targetRevision: {{ .Values.targetRevision | quote }}
+      ref: values
+  destination:
+    server: {{ .Values.destinationServer }}
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: {{ .Values.syncPolicy.prune }}
+      selfHeal: {{ .Values.syncPolicy.selfHeal }}
+    syncOptions:
+      - ServerSideApply=true
+      - ServerSideDiff=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    # The operator injects the CA bundle into its own webhook at runtime.
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      name: kps-admission
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      name: kps-admission
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+{{- end }}

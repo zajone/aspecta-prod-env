@@ -1,0 +1,127 @@
+{{/*
+Two Argo CD projects with deliberately different privileges.
+
+The platform project installs cluster-wide infrastructure and needs broad
+permissions. The application project does not, so it is fenced in: one
+repository, one namespace, no cluster-scoped resources at all, and no ability
+to create Secrets or RBAC objects. If the application chart ever grew a
+ClusterRole or a Secret by accident, the sync would fail instead of silently
+widening the blast radius.
+*/}}
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  annotations:
+    # Projects must exist before any Application that references one, so they
+    # sit in a wave ahead of every Application in this chart. Without this an
+    # Application in wave -1 is created first and reports
+    # "referencing project platform which does not exist".
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Cluster infrastructure - ingress, metrics and the monitoring stack
+  sourceRepos:
+    - {{ .Values.repoURL | quote }}
+    - {{ .Values.charts.certManager.repo | quote }}
+    - {{ .Values.charts.ingressNginx.repo | quote }}
+    - {{ .Values.charts.metricsServer.repo | quote }}
+    - {{ .Values.charts.kubePrometheusStack.repo | quote }}
+  destinations:
+    - server: {{ .Values.destinationServer }}
+      namespace: cert-manager
+    - server: {{ .Values.destinationServer }}
+      namespace: ingress-nginx
+    - server: {{ .Values.destinationServer }}
+      namespace: monitoring
+    - server: {{ .Values.destinationServer }}
+      namespace: kube-system
+    - server: {{ .Values.destinationServer }}
+      namespace: aspecta
+    # The namespaces Application manages only cluster-scoped Namespace objects.
+    # Its destination namespace is never used for anything, but Argo CD still
+    # validates it against this list.
+    - server: {{ .Values.destinationServer }}
+      namespace: default
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+    - group: networking.k8s.io
+      kind: IngressClass
+    - group: apiregistration.k8s.io
+      kind: APIService
+    - group: scheduling.k8s.io
+      kind: PriorityClass
+    # The cluster-wide certificate authority. A ClusterIssuer is the one
+    # cluster-scoped object the TLS layer needs: every Certificate that
+    # references it is namespaced.
+    - group: cert-manager.io
+      kind: ClusterIssuer
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: aspecta
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: The Aspecta application - least privilege, single namespace
+  sourceRepos:
+    - {{ .Values.repoURL | quote }}
+  destinations:
+    - server: {{ .Values.destinationServer }}
+      namespace: aspecta
+  # Not one cluster-scoped object may be created by this project.
+  clusterResourceWhitelist: []
+  namespaceResourceBlacklist:
+    # Credentials are delivered out of band, so the application project has no
+    # business creating them.
+    - group: ""
+      kind: Secret
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: ConfigMap
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ServiceAccount
+    - group: apps
+      kind: Deployment
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+    - group: policy
+      kind: PodDisruptionBudget
+    - group: networking.k8s.io
+      kind: Ingress
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+    - group: monitoring.coreos.com
+      kind: ServiceMonitor
+    - group: monitoring.coreos.com
+      kind: PrometheusRule

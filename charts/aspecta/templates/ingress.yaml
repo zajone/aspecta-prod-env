@@ -1,0 +1,36 @@
+{{- if .Values.ingress.enabled }}
+{{- $frontend := include "aspecta.componentName" (dict "root" . "component" "frontend") }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "aspecta.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # A single entry point: the frontend serves the static UI and proxies
+          # /api/ to the backend Service, so the browser only ever talks to one
+          # origin and the backend needs no public route of its own.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $frontend }}
+                port:
+                  number: {{ .Values.frontend.service.port }}
+{{- end }}

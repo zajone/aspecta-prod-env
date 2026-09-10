@@ -1,0 +1,123 @@
+# Rendered by the nginx entrypoint (envsubst) into /etc/nginx/conf.d/default.conf
+# so the backend address can be supplied from the ConfigMap at deploy time.
+
+# One request id for the whole chain. ingress-nginx already stamps
+# X-Request-ID on the way in, so honour it and fall back to a generated one
+# for a call that did not come through the ingress. Logging
+# $http_x_request_id while forwarding $request_id - as this did - meant the
+# log line and the backend log line carried different ids, or none, which is
+# the one thing the matched JSON formats exist to prevent.
+map $http_x_request_id $aspecta_request_id {
+    default $http_x_request_id;
+    ""      $request_id;
+}
+
+# Structured access log, matching the backend's JSON logs so both workloads can
+# be parsed by one log pipeline.
+log_format aspecta_json escape=json
+  '{"time":"$time_iso8601","remote_addr":"$remote_addr","method":"$request_method",'
+  '"path":"$uri","query":"$args","status":$status,"bytes":$body_bytes_sent,'
+  '"duration":$request_time,"upstream_status":"$upstream_status",'
+  '"request_id":"$aspecta_request_id","user_agent":"$http_user_agent"}';
+
+# The scheme the browser actually used, which is not the scheme this server was
+# reached on: TLS is terminated at the Ingress, so nginx sees a plaintext
+# request carrying X-Forwarded-Proto: https. Overwriting that header with
+# $scheme - as the obvious `proxy_set_header X-Forwarded-Proto $scheme` does -
+# would tell the backend the request arrived over http. The fallback to $scheme
+# covers a direct in-cluster call, which has no forwarded header at all.
+map $http_x_forwarded_proto $aspecta_forwarded_proto {
+    default $http_x_forwarded_proto;
+    ""      $scheme;
+}
+
+upstream aspecta_backend {
+    server ${BACKEND_ADDR};
+    keepalive 16;
+}
+
+server {
+    listen 8080;
+    listen [::]:8080;
+    server_name _;
+
+    access_log /dev/stdout aspecta_json;
+    error_log  /dev/stderr warn;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    server_tokens off;
+    client_max_body_size 64k;
+
+    # Response hardening for everything this server returns.
+    #
+    # These live at server level and are inherited by every location - but only
+    # because no location below defines an add_header of its own. nginx does not
+    # merge add_header directives across levels: a single add_header inside a
+    # location discards every one inherited from the server. That is why cache
+    # policy below is expressed with `expires`, which is a different directive
+    # and does not reset the inheritance.
+    #
+    # The UI ships no third-party assets, so the policy can forbid every
+    # external origin outright.
+    add_header Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+    gzip_min_length 512;
+
+    # Probe endpoint served by nginx itself: it must report on this pod's
+    # health, not on the backend's.
+    location = /healthz {
+        access_log off;
+        default_type application/json;
+        return 200 '{"status":"ok"}';
+    }
+
+    # Single entry point for the browser: the API is proxied under the same
+    # origin, so the UI needs no CORS handling and no second Ingress host.
+    location /api/ {
+        # The backend sets its own security headers, which is right for a
+        # service that can also be called directly inside the cluster. At this
+        # edge they would arrive as a second copy of each header, and browsers
+        # combine duplicate Content-Security-Policy headers by intersecting
+        # them - so the upstream copies are dropped here and this server stays
+        # the single source of truth for what reaches the browser.
+        proxy_hide_header Content-Security-Policy;
+        proxy_hide_header X-Frame-Options;
+        proxy_hide_header X-Content-Type-Options;
+        proxy_hide_header Referrer-Policy;
+
+        proxy_pass http://aspecta_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $aspecta_forwarded_proto;
+        proxy_set_header X-Request-Id $aspecta_request_id;
+
+        proxy_connect_timeout 2s;
+        proxy_send_timeout 10s;
+        proxy_read_timeout 10s;
+        proxy_next_upstream error timeout http_502 http_503;
+    }
+
+    # `expires` rather than `add_header Cache-Control`: see the note above.
+    location = /index.html {
+        expires -1;
+    }
+
+    location ~* \.(css|js|svg|png|woff2)$ {
+        expires 1h;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

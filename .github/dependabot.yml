@@ -1,0 +1,28 @@
+# Keeping the pinned dependencies pinned is only safe if something proposes the
+# updates. Dependabot opens the pull requests; the pull-request workflow decides
+# whether they are mergeable.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /apps/backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"
+
+  - package-ecosystem: docker
+    directories:
+      - /apps/backend
+      - /apps/frontend
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"

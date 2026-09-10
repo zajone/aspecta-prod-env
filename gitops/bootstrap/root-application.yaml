@@ -1,0 +1,39 @@
+# The root of the app-of-apps, and the only manifest applied imperatively.
+#
+# scripts/bootstrap.sh substitutes the three placeholders from `git remote`
+# before applying it, so a fork deploys itself with no file edits. Everything
+# else in the cluster is created by Argo CD from git.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # The root application lives in the built-in project because it is what
+  # creates the restricted projects the workloads then use.
+  project: default
+  source:
+    repoURL: __REPO_URL__
+    targetRevision: __TARGET_REVISION__
+    path: gitops/root
+    helm:
+      parameters:
+        - name: repoURL
+          value: __REPO_URL__
+        - name: targetRevision
+          value: __TARGET_REVISION__
+        - name: imageOwner
+          value: __IMAGE_OWNER__
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      # Children are pruned when their Application is removed from git, which
+      # makes deleting a file the way to delete a component.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

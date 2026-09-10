@@ -1,0 +1,141 @@
+{{- if .Values.rbac.create }}
+{{- $fullname := include "aspecta.fullname" . }}
+{{/*
+Least privilege, in two layers.
+
+1. The workloads themselves get no API access whatsoever: their ServiceAccount
+   has automountServiceAccountToken disabled and no Role bound to it.
+2. Operating the service is split into two namespace-scoped roles. Neither is a
+   ClusterRole, so neither can read a single object outside this namespace -
+   including Secrets in other namespaces, which is the usual way a
+   read-only cluster role turns into a full compromise.
+
+Bind them to real users or groups through rbac.viewer.subjects /
+rbac.operator.subjects. The ServiceAccounts created here exist so the
+restriction can be demonstrated with kubectl auth can-i --as=...
+*/}}
+{{- if .Values.rbac.viewer.enabled }}
+{{- if .Values.rbac.viewer.createServiceAccount }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-viewer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+    aspecta.io/role: viewer
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-viewer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+rules:
+  # Read-only view of the workload, enough to triage an incident.
+  - apiGroups: [""]
+    resources: [pods, services, endpoints, configmaps, events]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets]
+    verbs: [get, list, watch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, list, watch]
+  # Secrets are deliberately absent: no operator role in this namespace can
+  # read the admin token.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-viewer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-viewer
+subjects:
+  {{- if .Values.rbac.viewer.createServiceAccount }}
+  - kind: ServiceAccount
+    name: {{ $fullname }}-viewer
+    namespace: {{ .Release.Namespace }}
+  {{- end }}
+  {{- with .Values.rbac.viewer.subjects }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}
+{{- if .Values.rbac.operator.enabled }}
+---
+{{- if .Values.rbac.operator.createServiceAccount }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+    aspecta.io/role: operator
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, endpoints, configmaps, events]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get, list]
+  # Restart a rollout and evict a misbehaving pod.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [apps]
+    resources: [deployments/scale]
+    verbs: [get, update, patch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch, patch]
+  # No create/delete on Deployments: the desired state comes from git through
+  # Argo CD, and an operator editing it by hand would simply be reverted.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aspecta.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-operator
+subjects:
+  {{- if .Values.rbac.operator.createServiceAccount }}
+  - kind: ServiceAccount
+    name: {{ $fullname }}-operator
+    namespace: {{ .Release.Namespace }}
+  {{- end }}
+  {{- with .Values.rbac.operator.subjects }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}
+{{- end }}

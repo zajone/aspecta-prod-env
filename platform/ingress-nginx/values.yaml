@@ -1,0 +1,171 @@
+# ingress-nginx for a kind cluster.
+#
+# The controller is pinned to the control-plane node (labelled ingress-ready by
+# clusters/kind/cluster.yaml) and binds host ports 80/443. kind forwards those
+# ports from the host, which is what makes the Ingress reachable at
+# https://aspecta.localtest.me without a cloud load balancer.
+#
+# Port 80 stays open, and serves exactly one thing: a 308 to https. Closing it
+# would leave a browser typing a bare hostname with a connection refused rather
+# than a redirect, which is worse for an operator and no better for security -
+# nothing but the redirect is ever answered over plaintext.
+controller:
+  replicaCount: 1
+
+  # Surge to zero, on purpose.
+  #
+  # This controller binds host ports 80 and 443 on the single node labelled
+  # ingress-ready, so two of its pods can never be schedulable at once. With the
+  # chart's default maxSurge of 25% - which rounds up to 1 - any change to the
+  # pod template deadlocks: the new pod stays Pending on "didn't have free ports
+  # for the requested pod ports" while the old one, which holds them, is never
+  # allowed to terminate. Argo CD then reports this Application as Progressing
+  # forever, which in turn blocks every later sync wave.
+  #
+  # Terminating first costs a few seconds of ingress downtime on a config
+  # rollout. That is the honest price of one host port on one node; the
+  # alternative in a real cluster is several replicas behind a load balancer,
+  # where the default strategy works as intended.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+
+  hostPort:
+    enabled: true
+    ports:
+      http: 80
+      https: 443
+
+  service:
+    # There is no cloud load balancer to fulfil a LoadBalancer Service in kind,
+    # and it is not needed: traffic arrives through the host port above.
+    enabled: true
+    type: ClusterIP
+
+  nodeSelector:
+    ingress-ready: "true"
+    kubernetes.io/os: linux
+
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Equal
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Equal
+      effect: NoSchedule
+
+  # Only serve Ingress objects that explicitly ask for this class, so an
+  # Ingress with a typo in ingressClassName fails loudly instead of being
+  # silently picked up.
+  ingressClassResource:
+    name: nginx
+    enabled: true
+    default: false
+  watchIngressWithoutClass: false
+
+  # The certificate served for any request whose Host matches no Ingress. Issued
+  # from this environment's own CA by platform/cert-manager/issuers.yaml, so even
+  # a request that ends in a 404 gets a handshake the operator's machine trusts
+  # instead of nginx's built-in fake certificate.
+  extraArgs:
+    default-ssl-certificate: ingress-nginx/default-wildcard-tls
+
+  config:
+    # Hardening and hygiene for everything behind this controller.
+    server-tokens: "false"
+
+    # Both off, and that is the security-relevant setting on this controller.
+    #
+    # This controller *is* the edge: it binds host ports 80 and 443 and there
+    # is no L7 proxy in front of it, so every X-Forwarded-* header arriving
+    # here was written by the client. Trusting them let anyone bypass the
+    # HTTPS redirect with a single header -
+    #   curl -H 'X-Forwarded-Proto: https' http://aspecta.localtest.me/
+    # was answered with 200 over plaintext - and made the logged client IP
+    # whatever the caller claimed.
+    #
+    # A deployment that really does sit behind a load balancer turns these on
+    # *together with* proxy-real-ip-cidr naming that balancer's range, so the
+    # trust is scoped to the one hop that earned it.
+    use-forwarded-headers: "false"
+    enable-real-ip: "false"
+    proxy-body-size: 1m
+    client-body-timeout: "10"
+    client-header-timeout: "10"
+    keep-alive: "60"
+
+    # ---------------------------------------------------------------------
+    # No plaintext, controller-wide
+    # ---------------------------------------------------------------------
+    # ssl-redirect only redirects hosts that have a TLS block; force-ssl-redirect
+    # redirects every host, whether it has one or not. Both are set so that an
+    # Ingress merged without a tls: section cannot quietly start serving an
+    # application over plaintext - it fails closed to the redirect instead.
+    #
+    # Nothing here uses an ACME HTTP-01 challenge (the CA is private, see
+    # platform/cert-manager/values.yaml), so there is no /.well-known path that
+    # needs to stay reachable over port 80.
+    ssl-redirect: "true"
+    force-ssl-redirect: "true"
+    # 308 rather than the default 308-vs-301 guesswork: it is the permanent
+    # redirect that preserves the method and body, so a redirected POST to the
+    # API is not silently turned into a GET.
+    http-redirect-code: "308"
+
+    ssl-protocols: "TLSv1.2 TLSv1.3"
+    # Forward secrecy only, AEAD only. Explicit rather than inherited so an
+    # upstream default change cannot widen it. TLS 1.3 negotiates its own suites
+    # and ignores this list.
+    ssl-ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
+    ssl-prefer-server-ciphers: "true"
+    ssl-ecdh-curve: "X25519:secp384r1"
+    # Session reuse cuts the full handshake out of most requests.
+    ssl-session-cache: "true"
+    ssl-session-cache-size: "10m"
+    ssl-session-timeout: "10m"
+    ssl-session-tickets: "false"
+
+    # HSTS: once a browser has seen this header it refuses to talk to the host
+    # over plaintext at all, so the redirect above stops being needed after the
+    # first visit.
+    hsts: "true"
+    hsts-max-age: "31536000"
+    # includeSubDomains is deliberately off. These hostnames sit under the
+    # shared public suffix localtest.me, and asserting HSTS for every subdomain
+    # of it would apply this cluster's policy to hosts it does not own.
+    hsts-include-subdomains: "false"
+    hsts-preload: "false"
+
+    # Structured access logs, so ingress and application logs can be parsed the
+    # same way.
+    log-format-escape-json: "true"
+    log-format-upstream: '{"time":"$time_iso8601","remote_addr":"$remote_addr","scheme":"$scheme","host":"$host","path":"$uri","method":"$request_method","status":$status,"bytes":$body_bytes_sent,"duration":$request_time,"upstream":"$proxy_upstream_name","upstream_status":"$upstream_status","request_id":"$req_id"}'
+
+  metrics:
+    enabled: true
+    serviceMonitor:
+      # Picked up by the Prometheus in the monitoring namespace, which selects
+      # ServiceMonitors cluster-wide.
+      enabled: true
+      scrapeInterval: 30s
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 320Mi
+
+  admissionWebhooks:
+    # Validates Ingress objects before they are admitted, which turns a broken
+    # snippet into a rejected apply rather than a reloading controller.
+    enabled: true
+    patch:
+      enabled: true
+
+  allowSnippetAnnotations: false
+
+defaultBackend:
+  enabled: false

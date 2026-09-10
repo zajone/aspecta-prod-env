@@ -1,0 +1,5 @@
+# The build context is this directory only; keep it to source and the dataset.
+Dockerfile
+.dockerignore
+*_test.go
+**/*_test.go

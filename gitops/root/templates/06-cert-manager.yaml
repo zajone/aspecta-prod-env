@@ -1,0 +1,70 @@
+{{/*
+cert-manager, in the wave between the namespaces and ingress-nginx.
+
+It has to be earlier than every component that publishes an Ingress, because
+those Ingresses now carry a cert-manager.io/cluster-issuer annotation and are
+only reachable over HTTPS once a certificate exists for their host. Argo CD does
+not advance to the next wave until this Application is Healthy, so by the time
+ingress-nginx syncs, the CRDs, the webhook and the CA are all in place.
+*/}}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  sources:
+    - repoURL: {{ .Values.charts.certManager.repo | quote }}
+      chart: cert-manager
+      targetRevision: {{ .Values.charts.certManager.version | quote }}
+      helm:
+        releaseName: cert-manager
+        {{- if not .Values.monitoring }}
+        parameters:
+          # No monitoring stack means no ServiceMonitor CRD to create one with.
+          - name: prometheus.servicemonitor.enabled
+            value: "false"
+        {{- end }}
+        valueFiles:
+          - $values/platform/cert-manager/values.yaml
+    - repoURL: {{ .Values.repoURL | quote }}
+      targetRevision: {{ .Values.targetRevision | quote }}
+      ref: values
+  destination:
+    server: {{ .Values.destinationServer }}
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      # The CRDs ship inside this chart, so pruning is off for the same reason
+      # it is off on the Prometheus Operator CRDs: removing a CRD deletes every
+      # Certificate and Issuer in the cluster along with it.
+      prune: false
+      selfHeal: {{ .Values.syncPolicy.selfHeal }}
+    syncOptions:
+      # Mandatory for the CRDs, which are larger than the annotation a
+      # client-side apply would have to store them in.
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+  ignoreDifferences:
+    # cainjector writes the CA bundle into cert-manager's own webhook at
+    # runtime; it is state, not configuration, and must not read as drift.
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      name: cert-manager-webhook
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      name: cert-manager-webhook
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle

@@ -1,0 +1,46 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ingress-nginx
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  # Multi-source: the chart comes from the upstream Helm repository, its values
+  # from this git repository. Nothing is vendored, and the values stay
+  # reviewable in a pull request.
+  sources:
+    - repoURL: {{ .Values.charts.ingressNginx.repo | quote }}
+      chart: ingress-nginx
+      targetRevision: {{ .Values.charts.ingressNginx.version | quote }}
+      helm:
+        releaseName: ingress-nginx
+        {{- if not .Values.monitoring }}
+        parameters:
+          # No monitoring stack means no ServiceMonitor CRD to create one with.
+          - name: controller.metrics.serviceMonitor.enabled
+            value: "false"
+        {{- end }}
+        valueFiles:
+          - $values/platform/ingress-nginx/values.yaml
+    - repoURL: {{ .Values.repoURL | quote }}
+      targetRevision: {{ .Values.targetRevision | quote }}
+      ref: values
+  destination:
+    server: {{ .Values.destinationServer }}
+    namespace: ingress-nginx
+  syncPolicy:
+    automated:
+      prune: {{ .Values.syncPolicy.prune }}
+      selfHeal: {{ .Values.syncPolicy.selfHeal }}
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

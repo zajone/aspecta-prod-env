@@ -1,0 +1,5 @@
+apiVersion: v2
+name: aspecta-gitops
+description: App-of-apps definition for the Aspecta production environment
+type: application
+version: 0.1.0

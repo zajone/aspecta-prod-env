@@ -1,0 +1,21 @@
+apiVersion: v2
+name: aspecta
+description: Aspecta deep-sky catalogue - production environment for the frontend and backend workloads
+type: application
+# version is the chart version and is bumped by CI whenever a new container
+# image is published. appVersion is the application version and doubles as the
+# default container image tag, so a chart release always points at a matching
+# image.
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/zajone/aspecta-prod-env
+sources:
+  - https://github.com/zajone/aspecta-prod-env
+maintainers:
+  - name: Matej Zajdek
+keywords:
+  - aspecta
+  - astronomy
+  - production
+annotations:
+  artifacthub.io/license: MIT

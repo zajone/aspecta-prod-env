@@ -1,0 +1,48 @@
+{{/*
+The CA itself, in its own Application one wave after cert-manager.
+
+Kept separate from the chart on purpose: an Issuer is configuration of this
+environment, not part of the upstream release, and it cannot be applied until
+cert-manager's validating webhook is answering. A single Application containing
+both would deadlock on its own webhook.
+*/}}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager-issuers
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: {{ .Values.repoURL | quote }}
+    targetRevision: {{ .Values.targetRevision | quote }}
+    path: platform/cert-manager
+    directory:
+      recurse: false
+      # values.yaml in the same directory belongs to the chart above, not here.
+      include: issuers.yaml
+  destination:
+    server: {{ .Values.destinationServer }}
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: {{ .Values.syncPolicy.prune }}
+      selfHeal: {{ .Values.syncPolicy.selfHeal }}
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+  ignoreDifferences:
+    # cert-manager records issuance state on the objects it owns.
+    - group: cert-manager.io
+      kind: Certificate
+      jqPathExpressions:
+        - .status

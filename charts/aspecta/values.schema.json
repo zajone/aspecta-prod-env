@@ -1,0 +1,342 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Aspecta chart values",
+  "description": "Validated at template time by Helm, so a typo in an Argo CD parameter fails the sync instead of producing a subtly wrong manifest.",
+  "type": "object",
+  "required": [
+    "global",
+    "config",
+    "backend",
+    "frontend",
+    "ingress"
+  ],
+  "additionalProperties": true,
+  "definitions": {
+    "component": {
+      "type": "object",
+      "required": [
+        "image",
+        "resources",
+        "autoscaling"
+      ],
+      "properties": {
+        "image": {
+          "type": "object",
+          "required": [
+            "repository"
+          ],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string"
+            }
+          }
+        },
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "autoscaling": {
+          "type": "object",
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "minReplicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxReplicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "targetCPUUtilizationPercentage": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        },
+        "podDisruptionBudget": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "minAvailable": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            }
+          }
+        },
+        "resources": {
+          "type": "object"
+        },
+        "service": {
+          "type": "object"
+        },
+        "nodeSelector": {
+          "type": "object"
+        },
+        "tolerations": {
+          "type": "array"
+        },
+        "podAnnotations": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "properties": {
+    "global": {
+      "type": "object",
+      "required": [
+        "image"
+      ],
+      "properties": {
+        "image": {
+          "type": "object",
+          "required": [
+            "registry",
+            "owner",
+            "pullPolicy"
+          ],
+          "properties": {
+            "registry": {
+              "type": "string",
+              "minLength": 1
+            },
+            "owner": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Registry namespace, normally the GitHub owner of this repository."
+            },
+            "pullPolicy": {
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            },
+            "pullSecrets": {
+              "type": "array"
+            }
+          }
+        }
+      }
+    },
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "banner": {
+          "type": "string"
+        },
+        "logLevel": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "logFormat": {
+          "enum": [
+            "json",
+            "text"
+          ]
+        },
+        "pageSizeDefault": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pageSizeMax": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "featureSearch": {
+          "type": "boolean"
+        },
+        "alertBufferSize": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "drainDelay": {
+          "type": "string"
+        },
+        "shutdownTimeout": {
+          "type": "string"
+        }
+      }
+    },
+    "secret": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "existingSecret": {
+          "type": "string"
+        },
+        "adminToken": {
+          "type": "string"
+        }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object"
+        }
+      }
+    },
+    "backend": {
+      "$ref": "#/definitions/component"
+    },
+    "frontend": {
+      "$ref": "#/definitions/component"
+    },
+    "ingress": {
+      "type": "object",
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "className": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "annotations": {
+          "type": "object"
+        },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "secretName": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "rbac": {
+      "type": "object"
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "ingressNamespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "monitoringNamespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dnsNamespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kubeletProbes": {
+          "type": "object"
+        }
+      }
+    },
+    "monitoring": {
+      "type": "object",
+      "properties": {
+        "serviceMonitor": {
+          "type": "object"
+        },
+        "prometheusRule": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "labels": {
+              "type": "object"
+            },
+            "slo": {
+              "type": "object",
+              "properties": {
+                "availabilityTarget": {
+                  "type": "number",
+                  "description": "Share of requests that must not fail. Must leave a non-zero error budget, so strictly below 1.",
+                  "exclusiveMinimum": 0,
+                  "exclusiveMaximum": 1
+                },
+                "window": {
+                  "type": "string",
+                  "description": "Window the error budget is accounted over. Only windows long enough to derive a burn-rate threshold above 1 are allowed - a shorter one produces an alert that fires forever on any non-zero error rate.",
+                  "enum": [
+                    "3d",
+                    "7d",
+                    "30d"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "errorRatio": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "latencyP95": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "restarts": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "grafanaDashboard": {
+          "type": "object"
+        }
+      }
+    },
+    "tests": {
+      "type": "object"
+    }
+  }
+}
