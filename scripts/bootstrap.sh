@@ -174,6 +174,19 @@ wait_for "the application to be ready" 600 \
 
 wait_for "every TLS certificate to be issued" 300 \
   kube wait --for=condition=Ready certificate --all --all-namespaces --timeout=10s
+
+# The last gate, and the one that makes "ready" mean it. The waits above check
+# individual workloads, which can all be up while Argo CD still has a failed
+# task in flight - most reliably the three monitoring Ingresses, which lose a
+# race with the ingress-nginx admission webhook on a first install and are
+# only applied on the retry. Argo heals it within a minute, but until it does
+# the environment is genuinely incomplete, and `make up` used to print
+# "Environment ready" straight into it. Anyone who then ran `make verify` got
+# a dozen failures from an environment that was merely still converging.
+wait_for "every Argo CD application to be synced and healthy" 600 bash -c \
+  "test -z \"\$(kubectl --context '${KUBE_CONTEXT}' -n '${ARGOCD_NAMESPACE}' get applications \
+     -o jsonpath='{range .items[*]}{.status.sync.status}/{.status.health.status} {end}' 2>/dev/null \
+     | tr ' ' '\n' | grep -v '^Synced/Healthy$' | grep -v '^$')\""
 echo
 
 # --- 9. summary -------------------------------------------------------------
