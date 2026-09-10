@@ -56,6 +56,21 @@ build: ## Build both container images and load them into the cluster
 lint: ## Run every static check CI runs (Go, Helm, kubeconform, shell)
 	@scripts/lint.sh
 
+.PHONY: hooks
+hooks: ## Install the git pre-commit hooks
+	@command -v pre-commit >/dev/null || { \
+		echo "pre-commit is not installed. Install it with one of:"; \
+		echo "  pipx install pre-commit     # recommended, keeps it isolated"; \
+		echo "  brew install pre-commit"; \
+		echo "  pip install --user pre-commit"; \
+		exit 1; }
+	@pre-commit install
+	@echo "hooks installed; run 'make hooks-run' to check the whole tree now"
+
+.PHONY: hooks-run
+hooks-run: ## Run the pre-commit hooks against every file, not just staged ones
+	@pre-commit run --all-files
+
 .PHONY: test
 test: ## Run the backend unit tests
 	@cd apps/backend && go test ./... -cover

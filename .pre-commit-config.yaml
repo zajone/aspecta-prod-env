@@ -1,0 +1,102 @@
+# Hooks that run before a commit is written.
+#
+# The rule for what belongs here is speed: a hook that takes longer than a
+# couple of seconds gets bypassed with --no-verify, and a bypassed hook is
+# worse than no hook because it looks like coverage. So this file holds the
+# checks that are instant and catch mistakes at the point they are made -
+# formatting, syntax, secrets - and leaves everything slow to CI:
+#
+#   go test              needs the whole module compiled
+#   kubeconform          fetches CRD schemas over the network
+#   trivy                pulls a vulnerability database
+#   the end-to-end run   needs a cluster
+#
+# scripts/lint.sh remains the single command that runs the full set, and the
+# pull-request workflow runs both it and these hooks - so a hook skipped
+# locally still fails the pull request.
+#
+# Install with: make hooks
+# Update the pinned revisions with: pre-commit autoupdate
+
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  # ---------------------------------------------------------------- hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Markdown uses two trailing spaces as a hard line break.
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-added-large-files
+        args: [--maxkb=512]
+
+      - id: check-json
+        # VS Code's own files are JSONC - comments are part of the format
+        # there, and the editor is the only thing that reads them.
+        exclude: ^\.vscode/
+      - id: check-yaml
+        # Helm templates are Go templates, not YAML: {{ }} makes the parser
+        # fail on files that are perfectly correct. The rendered output is
+        # what matters, and lint.sh validates that with kubeconform.
+        exclude: |
+          (?x)^(
+            charts/[^/]+/templates/.*|
+            gitops/[^/]+/templates/.*|
+            gitops/bootstrap/root-application\.yaml
+          )$
+        # Argo CD manifests and the monitoring values are multi-document.
+        args: [--allow-multiple-documents]
+
+  # ------------------------------------------------------------------- shell
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.11.0
+    hooks:
+      - id: shellcheck
+        # Matches what lint.sh and CI enforce, so a hook that passes locally
+        # cannot fail the pull request for a different reason.
+        args: [-x, -S, warning]
+
+  # ---------------------------------------------------------------------- go
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: bash -c 'cd apps/backend && test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }'
+        language: system
+        files: ^apps/backend/.*\.go$
+        pass_filenames: false
+
+      - id: go-vet
+        name: go vet
+        entry: bash -c 'cd apps/backend && go vet ./...'
+        language: system
+        files: ^apps/backend/.*\.(go|mod|sum)$
+        pass_filenames: false
+
+  # ------------------------------------------------------------------- helm
+  - repo: local
+    hooks:
+      - id: helm-lint
+        name: helm lint
+        # Renders both charts, which catches a broken template immediately.
+        # Fast because nothing is fetched: no dependencies, no remote charts.
+        entry: bash -c 'PATH="$PWD/bin:$PATH"; helm lint --strict charts/aspecta && helm lint --strict gitops/root'
+        language: system
+        files: ^(charts|gitops)/.*
+        pass_filenames: false
+
+  # ---------------------------------------------------------------- secrets
+  # The repository's whole claim is that no credential is ever committed - the
+  # chart renders no Secret and everything is provisioned out of band. This is
+  # the hook that keeps that true by accident as well as by intent.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks

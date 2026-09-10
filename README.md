@@ -186,6 +186,7 @@ a namespace-wide one. The extra hop costs about 0.3 ms on a loopback network.
 | Container runtime | Docker Engine, running | Docker Desktop or OrbStack, running |
 | `kubectl` | any 1.30+ | `brew install kubectl` |
 | `git`, `bash`, `curl`, `make` | preinstalled | preinstalled |
+| `pre-commit` (optional) | `pipx install pre-commit` | `brew install pre-commit` |
 | Free RAM | 6 GB minimum, 8 GB recommended | same |
 | Free CPU | 2 minimum, 4 recommended | same |
 | Host ports | 80 and 443 must be free | same |
@@ -705,6 +706,24 @@ goes to 1 — which trips `AspectaMaintenanceModeLeftOn` if it is forgotten.
 ---
 
 ## Verification
+
+### Before a commit
+
+```bash
+make hooks        # once, installs the git hook
+make hooks-run    # run every hook against the whole tree
+```
+
+The hooks are the fast half of the checks: formatting, file hygiene, JSON and
+YAML syntax, `shellcheck`, `gofmt`, `go vet`, `helm lint` and a secret scan
+with gitleaks. Anything slower stays out of them on purpose - `go test`,
+`kubeconform` (which fetches CRD schemas) and Trivy all belong to CI, because
+a hook that takes half a minute is a hook people disable.
+
+They are optional locally and enforced centrally: the pull-request workflow
+runs the same set, so a commit made with `--no-verify` fails there rather than
+landing unchecked. `pre-commit autoupdate` refreshes the pinned revisions.
+
 
 Three layers, all runnable locally:
 
