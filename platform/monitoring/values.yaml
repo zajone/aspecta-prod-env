@@ -35,14 +35,25 @@ defaultRules:
     kubeSchedulerRecording: false
     kubeControllerManager: false
     windows: false
+    # The kube-apiserver SLO burn-rate alerts. A real measurement, but of the
+    # kind control plane rather than of anything this repository deploys:
+    # burnrate6h sits around 0.18 against a threshold of 0.06, because a
+    # three-node cluster on a laptop genuinely does serve the API slowly.
+    # Nobody can act on it from here, which is the same reason the four rows
+    # above are off.
+    #
+    # Switched off as a group rather than by rule name on purpose: the group
+    # holds nothing but the four KubeAPIErrorBudgetBurn rules, and removing
+    # them individually leaves the chart rendering `rules: null`, which the
+    # PrometheusRule CRD rejects with "must be of type array".
+    kubeApiserverSlos: false
     # The dead man's switch stays on: an always-firing alert is the only way to
     # notice that the alerting pipeline itself has stopped working.
     general: true
 
-  # Two upstream alerts that fire permanently here for reasons no operator of
-  # this environment can act on. Disabled by name rather than by group, so the
-  # useful alerts beside them - AlertmanagerFailedReload, KubeAPIDown and the
-  # rest - stay on.
+  # Disabled by name rather than by group, so the useful alerts beside it -
+  # AlertmanagerFailedReload, AlertmanagerConfigInconsistent and the rest -
+  # stay on.
   disabled:
     # Claims half the Alertmanager instances are crashlooping. They are not:
     # the pod reports 0 restarts and 2/2 ready. The rule counts
@@ -56,14 +67,6 @@ defaultRules:
     # The premise does not hold either way: "half or more instances" is
     # meaningless for the single replica this environment runs.
     AlertmanagerClusterCrashlooping: true
-
-    # A real measurement, but of the kind control plane rather than of anything
-    # this repository deploys. burnrate6h sits around 0.18 against a threshold
-    # of 0.06 because a three-node kind cluster on a laptop genuinely does
-    # serve the API slowly. Nobody can fix that from here, and the same
-    # reasoning already retired the etcd, scheduler and controller-manager
-    # rules above.
-    KubeAPIErrorBudgetBurn: true
 
 ## ---------------------------------------------------------------------------
 ## Prometheus
